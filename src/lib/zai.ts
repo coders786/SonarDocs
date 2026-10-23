@@ -1,0 +1,218 @@
+import ZAI from "z-ai-web-dev-sdk";
+
+let zaiPromise: Promise<Awaited<ReturnType<typeof ZAI.create>>> | null = null;
+
+export async function getZai() {
+  if (!zaiPromise) {
+    zaiPromise = ZAI.create();
+  }
+  return zaiPromise;
+}
+
+export type VisionImage = { mime: string; base64: string };
+
+export function imageContentPart(img: VisionImage) {
+  return {
+    type: "image_url" as const,
+    image_url: { url: `data:${img.mime};base64,${img.base64}` },
+  };
+}
+
+/**
+ * Run a vision chat completion. The system prompt carries the subject's full
+ * research article; user prompt carries the task; images are passed as
+ * base64 data URLs.
+ */
+export async function visionChat(
+  system: string,
+  user: string,
+  images: VisionImage[],
+  opts: { thinking?: boolean } = {},
+): Promise<string> {
+  const zai = await getZai();
+  const content: Array<Record<string, unknown>> = [{ type: "text", text: user }];
+  for (const img of images) content.push(imageContentPart(img));
+  const completion = await zai.chat.completions.createVision({
+    messages: [
+      { role: "assistant", content: system },
+      { role: "user", content } as never,
+    ],
+    thinking: { type: opts.thinking ? "enabled" : "disabled" },
+  } as never);
+  const text = completion.choices[0]?.message?.content;
+  if (!text) throw new Error("Empty vision model response");
+  return text;
+}
+
+/** Plain text chat completion (used by the document AI). */
+export async function textChat(system: string, user: string): Promise<string> {
+  const zai = await getZai();
+  const completion = await zai.chat.completions.create({
+    messages: [
+      { role: "assistant", content: system },
+      { role: "user", content: user },
+    ],
+    thinking: { type: "disabled" },
+  });
+  const text = completion.choices[0]?.message?.content;
+  if (!text) throw new Error("Empty model response");
+  return text;
+}
+
+/** Extract the first JSON value from a model response (tolerates fences/prose). */
+export function extractJson<T = unknown>(raw: string): T {
+  let text = raw.trim();
+  // strip markdown code fences
+  text = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "");
+  // direct parse
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    /* keep going */
+  }
+  // repair: shorthand boxes — models often emit {"x": 54, 56, 680, 106}
+  // (dropping the y/w/h key names) or "box": [54, 56, 680, 106]
+  let repaired = text.replace(
+    /"box"\s*:\s*\{\s*"x"\s*:\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\}/g,
+    '"box":{"x":$1,"y":$2,"w":$3,"h":$4}',
+  );
+  repaired = repaired.replace(
+    /"box"\s*:\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\]/g,
+    '"box":{"x":$1,"y":$2,"w":$3,"h":$4}',
+  );
+  // repair: nested boxes — "box":{"box":{...}} → "box":{...}
+  for (let i = 0; i < 4; i++) {
+    const next = repaired.replace(/"box"\s*:\s*\{\s*"box"\s*:\s*/g, '"box":');
+    if (next === repaired) break;
+    repaired = next;
+  }
+  // repair: trailing commas before } or ]
+  repaired = repaired.replace(/,\s*([}\]])/g, "$1");
+  // repair: LaTeX backslashes — "\sqrt{x}" is invalid JSON (only \" \\ \/ \b \f \n \r \t \uXXXX are legal)
+  repaired = repaired.replace(/\\(?!["\\/bfnrtu])/g, "\\\\");
+  if (repaired !== text) {
+    try {
+      return JSON.parse(repaired) as T;
+    } catch {
+      /* keep going */
+    }
+  }
+  // find first {...} or [...] block
+  for (const [open, close] of [
+    ["{", "}"],
+    ["[", "]"],
+  ] as const) {
+    const start = text.indexOf(open);
+    if (start === -1) continue;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === open) depth++;
+      else if (ch === close) {
+        depth--;
+        if (depth === 0) {
+          const slice = text.slice(start, i + 1);
+          try {
+            return JSON.parse(slice) as T;
+          } catch {
+            break;
+          }
+        }
+      }
+    }
+  }
+  throw new Error(`Could not parse JSON from model response: ${raw.slice(0, 300)}`);
+}
+
+/** Detect rate-limit errors so callers can back off. */
+function isRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /429|too many requests|rate limit/i.test(msg);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Vision call that must return JSON — retries with feedback when the model
+ * emits malformed JSON (a common failure mode with large system prompts) and
+ * backs off on rate limits.
+ */
+export async function visionJson<T>(
+  system: string,
+  user: string,
+  images: VisionImage[],
+  opts: { retries?: number } = {},
+): Promise<T> {
+  const retries = opts.retries ?? 2;
+  let lastError: unknown = null;
+  let rateLimited = 0;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    let raw = "";
+    try {
+      raw = await visionChat(
+        system,
+        attempt === 0
+          ? user
+          : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object, double-checking that every key and value is properly quoted and separated.`,
+        images,
+      );
+    } catch (err) {
+      lastError = err;
+      if (isRateLimitError(err) && rateLimited < 3) {
+        rateLimited++;
+        await sleep(15000 * rateLimited);
+        attempt--; // retry the same attempt after backing off
+        continue;
+      }
+      continue;
+    }
+    try {
+      return extractJson<T>(raw);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Model did not return valid JSON");
+}
+
+/** Text call that must return JSON — same retry behaviour. */
+export async function textJson<T>(system: string, user: string, opts: { retries?: number } = {}): Promise<T> {
+  const retries = opts.retries ?? 2;
+  let lastError: unknown = null;
+  let rateLimited = 0;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    let raw = "";
+    try {
+      raw = await textChat(
+        system,
+        attempt === 0
+          ? user
+          : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object.`,
+      );
+    } catch (err) {
+      lastError = err;
+      if (isRateLimitError(err) && rateLimited < 3) {
+        rateLimited++;
+        await sleep(15000 * rateLimited);
+        attempt--;
+        continue;
+      }
+      continue;
+    }
+    try {
+      return extractJson<T>(raw);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Model did not return valid JSON");
+}

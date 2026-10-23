@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Research articles: deep-research documents (one per subject) that get
+// loaded into the OCR model's system prompt when the user selects a subject.
+model ResearchArticle {
+  id        String   @id @default(cuid())
+  subject   String   @unique // slug: 'sindhi' | 'urdu' | 'english' | 'mathematics' | custom
+  title     String
+  language  String // display label, e.g. 'Sindhi (سنڌي)'
+  direction String @default("ltr") // 'rtl' | 'ltr'
+  content   String // full markdown research article
+  isCustom  Boolean  @default(false)
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// One OCR run over a set of uploaded page images for a chosen subject.
+model OcrSession {
+  id        String   @id @default(cuid())
+  subject   String
+  status    String   @default("active") // active | verified | documented
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  pages     OcrPage[]
+  documents DocumentProject[]
+}
+
+// One uploaded handwritten page image.
+model OcrPage {
+  id            String   @id @default(cuid())
+  sessionId     String
+  session       OcrSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  index         Int
+  status        String   @default("pending") // pending | processing | transcribed | verified
+  imageBase64   String // display copy of the (downscaled) original, data URL
+  overlayBase64 String? // layout-analysis overlay image with numbered bands
+  width         Int?
+  height        Int?
+  bands         String? // JSON: python layout analysis result
+  createdAt     DateTime @default(now())
+  lines         TranscriptionLine[]
+}
+
+// One detected text band (line) on a page, with its OCR reading, confidence
+// and the user's verification.
+model TranscriptionLine {
+  id            String   @id @default(cuid())
+  pageId        String
+  page          OcrPage  @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  order         Int
+  kind          String   @default("text") // text | heading | list | math | ignore
+  text          String   @default("") // OCR diplomatic reading
+  latex         String? // LaTeX form for math lines
+  confidence    String   @default("medium") // high | medium | low | illegible
+  alternatives  String? // JSON: [{ text, note }]
+  notes         String?
+  bbox          String? // JSON: { x, y, w, h } in page coordinates
+  cropBase64    String? // focused crop thumbnail used during verification
+  verifiedText  String? // user-confirmed text after review
+  status        String   @default("pending") // pending | approved | corrected | flagged
+  updatedAt     DateTime @updatedAt
+
+  @@unique([pageId, order])
+}
+
+// AI-generated / user-edited document built from verified transcriptions.
+model DocumentProject {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   OcrSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  title     String   @default("Untitled Document")
+  docType   String   @default("formatted-notes") // transcript | formatted-notes | essay | study-sheet
+  subject   String
+  blocks    String // JSON: [{ id, type, text, latex?, level? }]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
