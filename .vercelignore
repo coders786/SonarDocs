@@ -1,0 +1,13 @@
+db/custom.db
+.sonar-tmp
+download
+examples
+mini-services
+tests
+tool-results
+worklog.md
+dev.log
+server.log
+.zscripts
+skills
+Caddyfile
