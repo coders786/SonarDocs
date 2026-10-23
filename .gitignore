@@ -57,3 +57,14 @@ server.log
 db/custom.db
 dev.log
 server.log
+
+# sandbox internals (not part of the project)
+.zscripts/
+Caddyfile
+download/
+examples/
+mini-services/
+tests/
+tool-results/
+worklog.md
+.env

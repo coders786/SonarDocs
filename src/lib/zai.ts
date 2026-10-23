@@ -1,10 +1,30 @@
 import ZAI from "z-ai-web-dev-sdk";
 
-let zaiPromise: Promise<Awaited<ReturnType<typeof ZAI.create>>> | null = null;
+/** The SDK client instance type (constructor is private, so infer from create()). */
+type ZaiClient = Awaited<ReturnType<typeof ZAI.create>>;
 
-export async function getZai() {
+let zaiPromise: Promise<ZaiClient> | null = null;
+
+/**
+ * Create the SDK client. Configuration priority:
+ *  1. ZAI_BASE_URL + ZAI_API_KEY env vars (used on Vercel / self-hosting,
+ *     where /etc/.z-ai-config does not exist).
+ *  2. The SDK's own config file discovery (sandbox / local dev).
+ */
+async function createZai(): Promise<ZaiClient> {
+  const baseUrl = process.env.ZAI_BASE_URL;
+  const apiKey = process.env.ZAI_API_KEY;
+  if (baseUrl && apiKey) {
+    // constructor is private in the typings but functional — cast through
+    const Ctor = ZAI as unknown as new (config: Record<string, string>) => ZaiClient;
+    return new Ctor({ baseUrl, apiKey });
+  }
+  return ZAI.create();
+}
+
+export async function getZai(): Promise<ZaiClient> {
   if (!zaiPromise) {
-    zaiPromise = ZAI.create();
+    zaiPromise = createZai();
   }
   return zaiPromise;
 }
