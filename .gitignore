@@ -68,3 +68,6 @@ tests/
 tool-results/
 worklog.md
 .env
+
+# runtime uploads (user images, not source)
+upload/
