@@ -2,6 +2,34 @@ import fs from "fs";
 import path from "path";
 import { PrismaClient } from "@prisma/client";
 
+/**
+ * Serverless SQLite handling.
+ *
+ * Prisma reads DATABASE_URL when the client is instantiated. Sandboxes and
+ * dev machines point it at ./db/custom.db; on serverless hosts (Vercel) the
+ * filesystem is read-only except /tmp, so we redirect it there and
+ * auto-bootstrap the schema from db/bootstrap.sql (ensureDb below).
+ */
+function resolveDbUrl(): void {
+  const url = process.env.DATABASE_URL;
+  const needsTmp =
+    !url ||
+    url.startsWith("file:/home/") ||
+    (url.startsWith("file:") && !fs.existsSync(path.dirname(url.slice("file:".length) || "/")));
+  if (process.env.VERCEL || needsTmp) {
+    if (process.env.VERCEL || !url || url.startsWith("file:/home/")) {
+      const dir = process.env.VERCEL ? "/tmp/sonar" : path.join(process.cwd(), "db");
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+      } catch {
+        /* ignore */
+      }
+      process.env.DATABASE_URL = `file:${path.join(dir, "custom.db")}`;
+    }
+  }
+}
+resolveDbUrl();
+
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
   __sonarDbReady: Promise<void> | undefined;
