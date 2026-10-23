@@ -93,10 +93,12 @@ export default function ProcessingStep() {
       );
       setProgress({ bands: layout.bands, totalBands: readable.length });
 
-      // ---- focused reads, batches of 4, two at a time
+      // ---- focused reads: ONE band per vision call (multi-crop calls let
+      // the model mix up crop→band attribution, esp. on RTL scripts),
+      // two calls in flight at a time
       setProgress({ stage: "reading" });
       const indices = readable.map((b) => b.index);
-      const batches = chunk(indices, 4);
+      const batches = chunk(indices, 1);
       const failed: number[] = [];
       let doneCount = 0;
 
@@ -177,7 +179,7 @@ export default function ProcessingStep() {
       for (const p of sess.session.pages) {
         const failed = failedBands[p.id] || [];
         if (!failed.length) continue;
-        const retry = chunk(failed, 4);
+        const retry = chunk(failed, 1);
         for (const batch of retry) {
           try {
             const res = await api.ocrRead({ pageId: p.id, indices: batch });

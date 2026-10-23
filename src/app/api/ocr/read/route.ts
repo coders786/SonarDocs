@@ -77,7 +77,9 @@ export async function POST(req: NextRequest) {
 
     // python (or sharp) crop + focus for each band; when a crop contains
     // (almost) no ink, the box likely misses the writing — expand it
-    // vertically and try once more before giving up.
+    // vertically and try once more before giving up. Crops that remain
+    // blank are NOT sent to the model (blank crops invite hallucination):
+    // they are stored as ignored placeholder lines instead.
     const pageH = page.height || 1200;
     const crops = await Promise.all(
       batch.map(async (b) => {
@@ -101,6 +103,12 @@ export async function POST(req: NextRequest) {
       }),
     );
 
+    const BLANK_INK = 0.0015;
+    const blankIdx = new Set<number>();
+    crops.forEach((c, i) => {
+      if (c.inkRatio >= 0 && c.inkRatio < BLANK_INK) blankIdx.add(batch[i].index);
+    });
+
     // previously-read lines for continuity context
     const priorLines = await db.transcriptionLine.findMany({
       where: { pageId, order: { lt: Math.min(...batch.map((b) => b.index)) } },
@@ -113,25 +121,31 @@ export async function POST(req: NextRequest) {
       .join("\n");
 
     const system = buildReadSystemPrompt(article.content, subject);
+    const readBatch = batch.filter((b) => !blankIdx.has(b.index));
     const user = buildReadUserPrompt(
       subject,
-      batch.map((b) => ({ index: b.index, preliminary: b.preliminary, kind: b.kind })),
+      readBatch.map((b) => ({ index: b.index, preliminary: b.preliminary, kind: b.kind })),
       context,
     );
 
-    const images = crops.map((c) => {
-      const mime = c.imageDataUrl.slice(5, c.imageDataUrl.indexOf(";"));
-      return { mime, base64: c.imageDataUrl.split(",")[1] || "" };
-    });
+    const images = readBatch
+      .map((b) => crops[batch.findIndex((x) => x.index === b.index)])
+      .filter(Boolean)
+      .map((c) => {
+        const mime = c.imageDataUrl.slice(5, c.imageDataUrl.indexOf(";"));
+        return { mime, base64: c.imageDataUrl.split(",")[1] || "" };
+      });
 
     let readings: Reading[] = [];
-    try {
-      const parsed = await visionJson<{ readings?: Reading[] }>(system, user, images);
-      if (Array.isArray(parsed.readings)) readings = parsed.readings;
-    } catch (err) {
-      if (err instanceof AiConfigError) throw err;
-      console.error("[api/ocr/read] model failed:", err);
-      throw new Error("The OCR model failed to respond for these bands. Please retry them.");
+    if (readBatch.length > 0) {
+      try {
+        const parsed = await visionJson<{ readings?: Reading[] }>(system, user, images);
+        if (Array.isArray(parsed.readings)) readings = parsed.readings;
+      } catch (err) {
+        if (err instanceof AiConfigError) throw err;
+        console.error("[api/ocr/read] model failed:", err);
+        throw new Error("The OCR model failed to respond for these bands. Please retry them.");
+      }
     }
 
     const validConf = new Set(["high", "medium", "low", "illegible"]);
@@ -149,7 +163,57 @@ export async function POST(req: NextRequest) {
     }> = [];
     for (let i = 0; i < batch.length; i++) {
       const band = batch[i];
-      const r = readings[i] || readings.find((x) => Number(x.index) === band.index);
+      const crop = crops[i];
+
+      // Blank crops (python found no ink): store as ignored placeholders —
+      // never ask the model to read emptiness (it hallucinates text).
+      if (blankIdx.has(band.index)) {
+        const line = await db.transcriptionLine.upsert({
+          where: { pageId_order: { pageId, order: band.index } },
+          create: {
+            pageId,
+            order: band.index,
+            kind: "ignore",
+            text: "",
+            latex: null,
+            confidence: "illegible",
+            alternatives: JSON.stringify([]),
+            notes: "python found no ink in this region — skipped OCR",
+            bbox: JSON.stringify(band.box),
+            cropBase64: crop.thumbDataUrl,
+          },
+          update: {
+            kind: "ignore",
+            text: "",
+            latex: null,
+            confidence: "illegible",
+            alternatives: JSON.stringify([]),
+            notes: "python found no ink in this region — skipped OCR",
+            bbox: JSON.stringify(band.box),
+            cropBase64: crop.thumbDataUrl,
+          },
+        });
+        outLines.push({
+          id: line.id,
+          index: band.index,
+          kind: line.kind,
+          text: line.text,
+          latex: line.latex,
+          confidence: line.confidence,
+          alternatives: [],
+          notes: line.notes,
+          cropBase64: line.cropBase64,
+          status: line.status,
+        });
+        continue;
+      }
+
+      // Match the model's readings to bands by INDEX first — the model may
+      // return entries in any order. Positional fallback only when the
+      // counts match exactly (and no index matched).
+      const r =
+        readings.find((x) => Number(x?.index) === band.index) ??
+        (readings.length === readBatch.length ? readings[readBatch.findIndex((b) => b.index === band.index)] : undefined);
       const text = String(r?.text ?? "").trim();
       const kind = ["text", "heading", "list", "math", "ignore"].includes(r?.kind || "")
         ? (r?.kind as string)
@@ -160,7 +224,6 @@ export async function POST(req: NextRequest) {
         ? r.alternatives.slice(0, 4).map((a) => ({ text: String(a.text || ""), note: String(a.note || "") }))
         : [];
       const notes = String(r?.notes || "").slice(0, 600);
-      const crop = crops[i];
 
       const line = await db.transcriptionLine.upsert({
         where: { pageId_order: { pageId, order: band.index } },

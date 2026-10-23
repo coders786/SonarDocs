@@ -43,11 +43,16 @@ function vertOverlap(a: BandDecision["box"], b: { x: number; y: number; w: numbe
  * geometry directly.
  *
  * Deterministic strategy: every python row becomes exactly one band (clean,
- * non-overlapping geometry, reading order). Each row inherits kind and
- * preliminary reading from the best-overlapping model decision. Model
- * decisions that overlap no row become extra bands (faint text python
- * missed) unless they would duplicate an existing band. When python found
- * nothing, the model's bands are used as-is.
+ * non-overlapping geometry, reading order). Each row inherits kind from the
+ * best-overlapping model decision. Model decisions that overlap no row
+ * become extra bands (faint text python missed) unless they would duplicate
+ * an existing band. When python found nothing, the model's bands are used
+ * as-is.
+ *
+ * NOTE: the model's "preliminary" quick-reads are deliberately DISCARDED —
+ * its box attribution can drift by whole rows (esp. on RTL cursive), so a
+ * preliminary often belongs to a different line than the box it arrived
+ * with. Feeding it to the read pass anchors the reader on the wrong text.
  */
 function reconcileBands(
   decisions: Array<BandDecision & { index: number }>,
@@ -74,7 +79,7 @@ function reconcileBands(
     if (best !== -1 && bestRatio > 0.35) {
       claimed.add(best);
       const d = decisions[best];
-      return { ...d, box: r, needsZoom: d.needsZoom || r.h < 22 };
+      return { ...d, box: r, preliminary: "", needsZoom: d.needsZoom || r.h < 22 };
     }
     return {
       index: 0,
@@ -95,7 +100,7 @@ function reconcileBands(
       return bottom - top > 2; // any overlap → likely a drifted duplicate
     });
     if (overlapsExisting) return;
-    out.push({ ...d, needsZoom: true, reason: `${d.reason ? d.reason + " " : ""}(model-only)`.trim() });
+    out.push({ ...d, preliminary: "", needsZoom: true, reason: `${d.reason ? d.reason + " " : ""}(model-only)`.trim() });
   });
 
   return out.sort((a, b) => a.box.y - b.box.y);

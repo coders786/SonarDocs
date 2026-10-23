@@ -137,14 +137,12 @@ export function buildReadUserPrompt(
   const listing = batch
     .map(
       (b) =>
-        `- Band ${b.index}${b.kind && b.kind !== "text" ? ` (layout says: ${b.kind})` : ""}${
-          b.preliminary ? ` — layout quick-read: "${b.preliminary}"` : " — no quick-read"
-        }`,
+        `- Band ${b.index}${b.kind && b.kind !== "text" ? ` (layout says: ${b.kind})` : ""}`,
     )
     .join("\n");
-  return `Read each of the ${batch.length} zoomed crop image(s) below in order.
+  return `Read each of the ${batch.length} zoomed crop image(s) below. The crops are given in this order:
 
 ${listing}
 
-${context ? `For continuity, the previously transcribed band(s) read:\n${context}\n` : ""}Apply the research dossier (confusion atlas, positional forms, dot evidence) to every letter. Return the JSON readings array as specified, one entry per image, same order.`;
+${context ? `For continuity, the previously transcribed band(s) read:\n${context}\n` : ""}Apply the research dossier (confusion atlas, positional forms, dot evidence) to every letter. Trust ONLY the ink you actually see in each crop — never invent or borrow text from context. Return the JSON readings array as specified — one entry per crop, and each entry MUST carry the correct "index" of its band (the number given above), regardless of entry order.`;
 }
