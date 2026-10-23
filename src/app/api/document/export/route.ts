@@ -16,6 +16,10 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+// Arabic-script font stack (ported from SonarDocs legacy docx-generator):
+// Nastaliq for Urdu-style cursive, Naskh for Sindhi/Arabic, then graceful fallbacks.
+const FONT_ARABIC = "Noto Nastaliq Urdu, Noto Naskh Arabic, Traditional Arabic, Arial";
+
 function slugTitle(title: string): string {
   return (
     title
@@ -24,6 +28,20 @@ function slugTitle(title: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 60) || "sonar-document"
   );
+}
+
+/** Build a TextRun with correct RTL handling: run-level rightToLeft flag +
+ *  Arabic-script font stack when the document direction is RTL. */
+function run(text: string, opts: { rtl: boolean; bold?: boolean; italics?: boolean; size?: number; color?: string; font?: string }): TextRun {
+  return new TextRun({
+    text,
+    bold: opts.bold,
+    italics: opts.italics,
+    size: opts.size,
+    color: opts.color,
+    font: opts.rtl ? FONT_ARABIC : opts.font,
+    rightToLeft: opts.rtl || undefined,
+  });
 }
 
 function blockToMarkdown(b: DocBlock): string {
@@ -61,7 +79,7 @@ async function buildDocx(blocks: DocBlock[], title: string, rtl: boolean): Promi
             ...base,
             heading: HeadingLevel.TITLE,
             alignment: rtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-            children: [new TextRun({ text: b.text, bold: true, size: 56, font: rtl ? "Arial" : undefined })],
+            children: [run(b.text, { rtl, bold: true, size: 56 })],
           }),
         );
         break;
@@ -70,7 +88,7 @@ async function buildDocx(blocks: DocBlock[], title: string, rtl: boolean): Promi
           new Paragraph({
             ...base,
             alignment: rtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-            children: [new TextRun({ text: b.text, italics: true, size: 26, color: "666666", font: rtl ? "Arial" : undefined })],
+            children: [run(b.text, { rtl, italics: true, size: 26, color: "666666" })],
           }),
         );
         break;
@@ -80,7 +98,7 @@ async function buildDocx(blocks: DocBlock[], title: string, rtl: boolean): Promi
             ...base,
             heading: b.level === 1 ? HeadingLevel.HEADING_1 : b.level === 3 ? HeadingLevel.HEADING_3 : HeadingLevel.HEADING_2,
             alignment: rtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-            children: [new TextRun({ text: b.text, bold: true, font: rtl ? "Arial" : undefined })],
+            children: [run(b.text, { rtl, bold: true })],
           }),
         );
         break;
@@ -88,8 +106,9 @@ async function buildDocx(blocks: DocBlock[], title: string, rtl: boolean): Promi
         children.push(
           new Paragraph({
             ...base,
+            bidirectional: rtl,
             bullet: { level: 0 },
-            children: [new TextRun({ text: b.text, font: rtl ? "Arial" : undefined })],
+            children: [run(b.text, { rtl })],
           }),
         );
         break;
@@ -108,7 +127,7 @@ async function buildDocx(blocks: DocBlock[], title: string, rtl: boolean): Promi
           new Paragraph({
             ...base,
             indent: { left: 480, right: rtl ? 480 : undefined },
-            children: [new TextRun({ text: b.text, italics: true, color: "444444", font: rtl ? "Arial" : undefined })],
+            children: [run(b.text, { rtl, italics: true, color: "444444" })],
           }),
         );
         break;
@@ -116,9 +135,7 @@ async function buildDocx(blocks: DocBlock[], title: string, rtl: boolean): Promi
         children.push(
           new Paragraph({
             ...base,
-            children: [
-              new TextRun({ text: `Note: ${b.text}`, italics: true, size: 24, color: "8a6d1a", font: rtl ? "Arial" : undefined }),
-            ],
+            children: [run(`Note: ${b.text}`, { rtl, italics: true, size: 24, color: "8a6d1a" })],
           }),
         );
         break;
@@ -129,7 +146,7 @@ async function buildDocx(blocks: DocBlock[], title: string, rtl: boolean): Promi
         children.push(
           new Paragraph({
             ...base,
-            children: [new TextRun({ text: b.text, font: rtl ? "Arial" : undefined })],
+            children: [run(b.text, { rtl })],
           }),
         );
     }
