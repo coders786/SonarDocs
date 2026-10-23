@@ -41,7 +41,12 @@ async function api(
       ...(body !== undefined && !opts.raw ? { "Content-Type": "application/json" } : {}),
       ...(opts.headers || {}),
     },
-    body: body === undefined ? undefined : opts.raw ? (body as Buffer) : JSON.stringify(body),
+    body:
+      body === undefined
+        ? undefined
+        : opts.raw
+          ? new Uint8Array(body as Buffer)
+          : JSON.stringify(body),
   });
   const text = await res.text();
   let data: any = text;
