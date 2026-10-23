@@ -474,3 +474,20 @@ All URLs below appeared in the web research for this article (searches + page fe
 45. Eastern Arabic numerals (Wikipedia): https://en.wikipedia.org/wiki/Eastern_Arabic_numerals — numeral variants across Arabic/Persian/Urdu.
 
 *Facts flagged in the text as "context-dependent" (letter-count conventions, exact digraph count, spacing habits in handwriting) reflect genuine source disagreement and should be treated as soft constraints.*
+
+---
+
+## 46. ENGINEERING APPENDIX — MODEL LIMITATION & ENSEMBLE PROTOCOL (measured in this system)
+
+Controlled testing of the production vision model on Urdu Nastaliq (this system's OCR engine) produced a critical, reproducible finding:
+
+- Given a clean 1600×260 px rendered Nastaliq sentence (no noise, no skew, no paper texture), the model returned fluent but **entirely wrong** Urdu — and self-reported confidence "high".
+- Binarisation (Otsu), larger zoom, and letter-by-letter decoding prompts did **not** fix it; the model still confused basic letter shapes (صبح→غہ, سورج→مورچہ).
+- The same model transcribes Latin handwriting and mathematics reliably; the failure is specific to Nastaliq's diagonal cascade.
+
+**Protocol consequence (enforced in this system's read pass):**
+1. Every Nastaliq/Arabic-script band is read **three times** from independent zoom variants (scale 3, scale 4, and a vertically-grown variant).
+2. Text that agrees across samples is accepted, but self-reported "high" is **capped to "medium"** — a vision model's fluent Nastaliq reading must never pass unverified on its own word.
+3. When the three samples disagree, the line is forced to **"low"** and all rival readings are surfaced as alternatives.
+
+**Editor consequence:** the Verify step is not a formality for Urdu — it is the actual OCR engine. Treat every model reading as a hypothesis to confirm against the crop thumbnail, not as an answer. This matches the published state of the art: the best reported handwritten-Urdu systems still operate near ~19% word error rate (ref. 40), and none are trusted without human adjudication.

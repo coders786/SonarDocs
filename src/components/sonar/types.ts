@@ -121,7 +121,7 @@ function mapSession(raw: {
           text: l.text as string,
           latex: (l.latex as string | null) ?? null,
           confidence: l.confidence as string,
-          alternatives: safeJsonArray(l.alternatives as string | null),
+          alternatives: safeJsonArray(l.alternatives as string | AltReading[] | null),
           notes: (l.notes as string | null) ?? null,
           cropBase64: (l.cropBase64 as string | null) ?? null,
           bbox: safeJson(l.bbox as string | null) as OcrLine["bbox"],
@@ -143,7 +143,9 @@ function safeJson(s: string | null): unknown {
   }
 }
 
-function safeJsonArray(s: string | null): AltReading[] {
+/** Accept either a JSON string (DB shape) or an already-parsed array (API shape). */
+function safeJsonArray(s: string | AltReading[] | null): AltReading[] {
+  if (Array.isArray(s)) return s as AltReading[];
   const v = safeJson(s);
   return Array.isArray(v) ? (v as AltReading[]) : [];
 }

@@ -19,13 +19,29 @@ type Reading = {
   notes?: string;
 };
 
+type CropVariant = Awaited<ReturnType<typeof cropBand>>;
+
 /**
  * POST /api/ocr/read  { pageId, indices: number[] (max 4) }
  *
  * For each requested band index: python crops + enhances + upscales the band
- * from the page, then the VLM reads the crops with the subject's FULL
+ * from the page, then the VLM reads the crop with the subject's FULL
  * research article in its system prompt. Results are stored as
  * TranscriptionLines.
+ *
+ * ENSEMBLE PROTOCOL (RTL subjects): current vision models read Arabic-script
+ * cursive (esp. Nastaliq) unreliably — controlled tests show they fabricate
+ * fluent text with self-reported "high" confidence even on clean, large
+ * renders. Countermeasures, applied only to RTL subjects (urdu, sindhi,
+ * custom RTL):
+ *   1. every band is read 3× from independent zoom variants of the crop;
+ *   2. readings that agree across samples are accepted, but confidence is
+ *      capped at "medium" (self-reported "high" is provably unreliable);
+ *   3. when samples disagree, confidence is forced to "low" and the rival
+ *      readings are surfaced in `alternatives` so the Verify step shows the
+ *      human editor every competing hypothesis.
+ * LTR subjects (Latin script, math) read reliably and keep the single-sample
+ * path.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -67,88 +83,12 @@ export async function POST(req: NextRequest) {
       nativeLabel: article.nativeLabel,
       direction: article.direction,
     };
-
-    const batch = indices
-      .map((i) => decisions.find((d) => d.index === i))
-      .filter((d): d is NonNullable<typeof d> => !!d);
-    if (batch.length === 0) {
-      return NextResponse.json({ error: "None of the given band indices exist." }, { status: 400 });
-    }
-
-    // python (or sharp) crop + focus for each band; when a crop contains
-    // (almost) no ink, the box likely misses the writing — expand it
-    // vertically and try once more before giving up. Crops that remain
-    // blank are NOT sent to the model (blank crops invite hallucination):
-    // they are stored as ignored placeholder lines instead.
-    const pageH = page.height || 1200;
-    const crops = await Promise.all(
-      batch.map(async (b) => {
-        const scale = b.needsZoom ? 4 : 3;
-        let crop = await cropBand(page.imageBase64, b.box, b.index, { scale, pad: 14 });
-        if (crop.inkRatio >= 0 && crop.inkRatio < 0.0015) {
-          const growY = Math.round(b.box.h * 0.6);
-          const expanded = {
-            x: b.box.x,
-            y: Math.max(0, b.box.y - growY),
-            w: b.box.w,
-            h: Math.min(pageH - Math.max(0, b.box.y - growY), b.box.h + growY * 2),
-          };
-          const retry = await cropBand(page.imageBase64, expanded, b.index, { scale, pad: 16 });
-          if (retry.inkRatio > crop.inkRatio) {
-            crop = retry;
-            b.box = expanded; // remember the corrected geometry
-          }
-        }
-        return crop;
-      }),
-    );
-
-    const BLANK_INK = 0.0015;
-    const blankIdx = new Set<number>();
-    crops.forEach((c, i) => {
-      if (c.inkRatio >= 0 && c.inkRatio < BLANK_INK) blankIdx.add(batch[i].index);
-    });
-
-    // previously-read lines for continuity context
-    const priorLines = await db.transcriptionLine.findMany({
-      where: { pageId, order: { lt: Math.min(...batch.map((b) => b.index)) } },
-      orderBy: { order: "desc" },
-      take: 2,
-    });
-    const context = priorLines
-      .reverse()
-      .map((l) => `« ${l.verifiedText || l.text} »`)
-      .join("\n");
+    const isRtl = subject.direction === "rtl";
 
     const system = buildReadSystemPrompt(article.content, subject);
-    const readBatch = batch.filter((b) => !blankIdx.has(b.index));
-    const user = buildReadUserPrompt(
-      subject,
-      readBatch.map((b) => ({ index: b.index, preliminary: b.preliminary, kind: b.kind })),
-      context,
-    );
+    const pageH = page.height || 1200;
+    const BLANK_INK = 0.0015;
 
-    const images = readBatch
-      .map((b) => crops[batch.findIndex((x) => x.index === b.index)])
-      .filter(Boolean)
-      .map((c) => {
-        const mime = c.imageDataUrl.slice(5, c.imageDataUrl.indexOf(";"));
-        return { mime, base64: c.imageDataUrl.split(",")[1] || "" };
-      });
-
-    let readings: Reading[] = [];
-    if (readBatch.length > 0) {
-      try {
-        const parsed = await visionJson<{ readings?: Reading[] }>(system, user, images);
-        if (Array.isArray(parsed.readings)) readings = parsed.readings;
-      } catch (err) {
-        if (err instanceof AiConfigError) throw err;
-        console.error("[api/ocr/read] model failed:", err);
-        throw new Error("The OCR model failed to respond for these bands. Please retry them.");
-      }
-    }
-
-    const validConf = new Set(["high", "medium", "low", "illegible"]);
     const outLines: Array<{
       id: string;
       index: number;
@@ -161,13 +101,56 @@ export async function POST(req: NextRequest) {
       cropBase64: string | null;
       status: string;
     }> = [];
-    for (let i = 0; i < batch.length; i++) {
-      const band = batch[i];
-      const crop = crops[i];
 
-      // Blank crops (python found no ink): store as ignored placeholders —
-      // never ask the model to read emptiness (it hallucinates text).
-      if (blankIdx.has(band.index)) {
+    // Per-band processing (sequential so multi-band requests don't flood the
+    // vision endpoint with sample×band parallel calls).
+    for (const index of indices) {
+      const band = decisions.find((d) => d.index === index);
+      if (!band) continue;
+
+      // ---- crop variants -------------------------------------------------
+      // python (or sharp) crop + focus; when a crop contains (almost) no ink
+      // the box likely misses the writing — expand vertically and retry once.
+      // Blank crops are NEVER sent to the model (blank crops invite
+      // hallucination); they are stored as ignored placeholder lines.
+      const baseScale = band.needsZoom ? 4 : 3;
+      const variantDefs = isRtl
+        ? [
+            { scale: baseScale, pad: 14 },
+            { scale: Math.min(6, baseScale + 1), pad: 24 },
+            { scale: baseScale, pad: 14, growY: Math.max(6, Math.round(band.box.h * 0.35)) },
+          ]
+        : [{ scale: baseScale, pad: 14 }];
+
+      async function cropWith(def: { scale: number; pad: number; growY?: number }): Promise<CropVariant> {
+        const box = def.growY
+          ? {
+              x: band.box.x,
+              y: Math.max(0, band.box.y - def.growY),
+              w: band.box.w,
+              h: Math.min(pageH - Math.max(0, band.box.y - def.growY), band.box.h + def.growY * 2),
+            }
+          : band.box;
+        let crop = await cropBand(page.imageBase64, box, band.index, { scale: def.scale, pad: def.pad });
+        if (crop.inkRatio >= 0 && crop.inkRatio < BLANK_INK) {
+          const growY = Math.round(band.box.h * 0.6);
+          const expanded = {
+            x: band.box.x,
+            y: Math.max(0, band.box.y - growY),
+            w: band.box.w,
+            h: Math.min(pageH - Math.max(0, band.box.y - growY), band.box.h + growY * 2),
+          };
+          const retry = await cropBand(page.imageBase64, expanded, band.index, { scale: def.scale, pad: def.pad + 2 });
+          if (retry.inkRatio > crop.inkRatio) crop = retry;
+        }
+        return crop;
+      }
+
+      const crops = await Promise.all(variantDefs.map((d) => cropWith(d)));
+      const primary = crops[0];
+
+      // Blank primary crop → ignored placeholder, no model call at all.
+      if (primary.inkRatio >= 0 && primary.inkRatio < BLANK_INK) {
         const line = await db.transcriptionLine.upsert({
           where: { pageId_order: { pageId, order: band.index } },
           create: {
@@ -180,7 +163,7 @@ export async function POST(req: NextRequest) {
             alternatives: JSON.stringify([]),
             notes: "python found no ink in this region — skipped OCR",
             bbox: JSON.stringify(band.box),
-            cropBase64: crop.thumbDataUrl,
+            cropBase64: primary.thumbDataUrl,
           },
           update: {
             kind: "ignore",
@@ -190,7 +173,7 @@ export async function POST(req: NextRequest) {
             alternatives: JSON.stringify([]),
             notes: "python found no ink in this region — skipped OCR",
             bbox: JSON.stringify(band.box),
-            cropBase64: crop.thumbDataUrl,
+            cropBase64: primary.thumbDataUrl,
           },
         });
         outLines.push({
@@ -208,22 +191,99 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      // Match the model's readings to bands by INDEX first — the model may
-      // return entries in any order. Positional fallback only when the
-      // counts match exactly (and no index matched).
-      const r =
-        readings.find((x) => Number(x?.index) === band.index) ??
-        (readings.length === readBatch.length ? readings[readBatch.findIndex((b) => b.index === band.index)] : undefined);
-      const text = String(r?.text ?? "").trim();
-      const kind = ["text", "heading", "list", "math", "ignore"].includes(r?.kind || "")
-        ? (r?.kind as string)
-        : band.kind;
-      const confidence = validConf.has(r?.confidence || "") ? (r?.confidence as string) : "medium";
-      const latex = subject.subject === "mathematics" ? String(r?.latex || "").trim() : null;
-      const alternatives = Array.isArray(r?.alternatives)
-        ? r.alternatives.slice(0, 4).map((a) => ({ text: String(a.text || ""), note: String(a.note || "") }))
+      // ---- continuity context (lines already transcribed above this one) --
+      const priorLines = await db.transcriptionLine.findMany({
+        where: { pageId, order: { lt: band.index } },
+        orderBy: { order: "desc" },
+        take: 2,
+      });
+      const context = priorLines
+        .reverse()
+        .map((l) => `« ${l.verifiedText || l.text} »`)
+        .join("\n");
+
+      // ---- vision reads (1 sample for LTR, 3 independent zooms for RTL) ---
+      const sampleReadings: Reading[] = [];
+      await Promise.all(
+        crops.map(async (crop, si) => {
+          if (si > 0 && crop.inkRatio >= 0 && crop.inkRatio < BLANK_INK) return; // blank variant
+          const user = buildReadUserPrompt(
+            subject,
+            [{ index: band.index, preliminary: "", kind: band.kind }],
+            context,
+          );
+          const mime = crop.imageDataUrl.slice(5, crop.imageDataUrl.indexOf(";"));
+          try {
+            const parsed = await visionJson<{ readings?: Reading[] }>(
+              system,
+              user,
+              [{ mime, base64: crop.imageDataUrl.split(",")[1] || "" }],
+            );
+            const readings = Array.isArray(parsed.readings) ? parsed.readings : [];
+            // index-first match with positional fallback (single band per
+            // call, so a mis-echoed index still lands on the only band)
+            const r =
+              readings.find((x) => Number(x?.index) === band.index) ??
+              (readings.length === 1 ? readings[0] : undefined);
+            if (r) sampleReadings[si] = r;
+          } catch (err) {
+            if (err instanceof AiConfigError) throw err;
+            console.error(`[api/ocr/read] sample ${si} failed for band ${band.index}:`, err);
+          }
+        }),
+      );
+
+      const valid = sampleReadings.filter(Boolean) as Reading[];
+      if (valid.length === 0) {
+        throw new Error("The OCR model failed to respond for these bands. Please retry them.");
+      }
+
+      // ---- consensus -------------------------------------------------------
+      const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+      const validConf = new Set(["high", "medium", "low", "illegible"]);
+      const groups = new Map<string, Reading[]>();
+      for (const r of valid) {
+        const key = norm(r.text || "");
+        groups.set(key, [...(groups.get(key) || []), r]);
+      }
+      const [bestKey, bestGroup] = [...groups.entries()].sort((a, b) => b[1].length - a[1].length)[0];
+      const unanimous = bestGroup.length === valid.length;
+      const agreed = bestGroup.length >= 2;
+
+      const chosen = bestGroup[0];
+      let confidence = validConf.has(chosen.confidence || "") ? chosen.confidence : "medium";
+      if (isRtl) {
+        // Calibration: RTL self-reports are unreliable — disagreement forces
+        // "low"; even unanimous RTL reads never claim "high" from the model
+        // alone (the human Verify step is what raises it).
+        if (!agreed) confidence = "low";
+        else if (confidence === "high") confidence = unanimous ? "medium" : "medium";
+      }
+
+      // Alternatives: model's own + dissenting ensemble texts.
+      const alternatives: Array<{ text: string; note: string }> = Array.isArray(chosen.alternatives)
+        ? chosen.alternatives.slice(0, 4).map((a) => ({ text: String(a.text || ""), note: String(a.note || "") }))
         : [];
-      const notes = String(r?.notes || "").slice(0, 600);
+      for (const r of valid) {
+        const t = norm(r.text || "");
+        if (!t || t === norm(chosen.text || "")) continue;
+        if (alternatives.some((a) => norm(a.text) === t)) continue;
+        alternatives.push({ text: t, note: "independent zoom sample disagreed" });
+      }
+      const altCount = Math.min(alternatives.length, 5);
+
+      const ensembleNote =
+        valid.length > 1
+          ? `ensemble: ${bestGroup.length}/${valid.length} zoom samples agree${
+              agreed ? "" : " — verify this line carefully"
+            }`
+          : "";
+      const notes = [String(chosen.notes || "").slice(0, 400), ensembleNote].filter(Boolean).join(" · ").slice(0, 600);
+
+      const kind = ["text", "heading", "list", "math", "ignore"].includes(chosen.kind || "")
+        ? (chosen.kind as string)
+        : band.kind;
+      const latex = subject.subject === "mathematics" ? String(chosen.latex || "").trim() : null;
 
       const line = await db.transcriptionLine.upsert({
         where: { pageId_order: { pageId, order: band.index } },
@@ -231,23 +291,23 @@ export async function POST(req: NextRequest) {
           pageId,
           order: band.index,
           kind,
-          text,
+          text: String(chosen.text || "").trim(),
           latex,
           confidence,
           alternatives: JSON.stringify(alternatives),
           notes,
           bbox: JSON.stringify(band.box),
-          cropBase64: crop.thumbDataUrl,
+          cropBase64: primary.thumbDataUrl,
         },
         update: {
           kind,
-          text,
+          text: String(chosen.text || "").trim(),
           latex,
           confidence,
           alternatives: JSON.stringify(alternatives),
           notes,
           bbox: JSON.stringify(band.box),
-          cropBase64: crop.thumbDataUrl,
+          cropBase64: primary.thumbDataUrl,
         },
       });
       outLines.push({
@@ -257,11 +317,15 @@ export async function POST(req: NextRequest) {
         text: line.text,
         latex: line.latex,
         confidence: line.confidence,
-        alternatives,
+        alternatives: alternatives.slice(0, altCount),
         notes: line.notes,
         cropBase64: line.cropBase64,
         status: line.status,
       });
+    }
+
+    if (outLines.length === 0) {
+      return NextResponse.json({ error: "None of the given band indices exist." }, { status: 400 });
     }
 
     await db.ocrPage.update({ where: { id: pageId }, data: { status: "transcribed" } });

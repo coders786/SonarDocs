@@ -64,6 +64,11 @@ type SonarState = {
 
 const now = () => new Date().toLocaleTimeString([], { hour12: false });
 
+// dev debugging aid: expose store snapshot (harmless in production)
+if (typeof window !== "undefined") {
+  (window as unknown as { __sonar?: unknown }).__sonarGetState = () => useSonar.getState();
+}
+
 export const useSonar = create<SonarState>((set) => ({
   step: "setup",
   articles: [],

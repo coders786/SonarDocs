@@ -372,3 +372,15 @@ After the research, request the handwritten Sindhi images if they have not yet b
 When the images are supplied, inspect the actual pixels and perform the transcription using the workflow above. If the system cannot zoom, crop, process, or inspect a particular image adequately, state that limitation explicitly.
 
 Use deep analysis, careful linguistic reasoning, and rigorous visual verification. The goal is not merely to produce plausible Sindhi text. The goal is to recover the writer's actual text with maximum defensible accuracy.
+
+---
+
+## ENGINEERING APPENDIX — MODEL LIMITATION & ENSEMBLE PROTOCOL (measured in this system)
+
+The same finding measured for Urdu applies to Sindhi's Arabic-script hand (both Naskh and Nastaliq styles): production vision models produce fluent-but-wrong readings and self-report high confidence, especially at small crop heights. The protocol consequences are identical and are enforced in this system's read pass:
+
+1. Every band is read three times from independent zoom variants.
+2. Agreement across samples is accepted but capped at "medium" confidence.
+3. Disagreement forces "low" and surfaces all rival readings as alternatives.
+
+Treat every model reading in the Verify step as a hypothesis to confirm against the crop thumbnail — for Sindhi, as for Urdu, the human editor is the authoritative corrector, not a rubber stamp.
