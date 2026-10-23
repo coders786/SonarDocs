@@ -19,7 +19,16 @@ async function createZai(): Promise<ZaiClient> {
     const Ctor = ZAI as unknown as new (config: Record<string, string>) => ZaiClient;
     return new Ctor({ baseUrl, apiKey });
   }
-  return ZAI.create();
+  try {
+    return await ZAI.create();
+  } catch (err) {
+    if (/configuration file/i.test(err instanceof Error ? err.message : String(err))) {
+      throw new Error(
+        "AI client is not configured on this host. Set the ZAI_BASE_URL and ZAI_API_KEY environment variables (Project → Settings → Environment Variables), then redeploy. Any chat-completions + vision compatible endpoint works.",
+      );
+    }
+    throw err;
+  }
 }
 
 export async function getZai(): Promise<ZaiClient> {
