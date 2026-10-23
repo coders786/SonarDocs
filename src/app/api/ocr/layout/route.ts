@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, ensureDb } from "@/lib/db";
-import { visionChat, visionJson } from "@/lib/zai";
+import { AiConfigError, visionChat, visionJson } from "@/lib/zai";
 import { buildLayoutSystemPrompt, buildLayoutUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
 
@@ -180,6 +180,7 @@ export async function POST(req: NextRequest) {
       const parsed = await visionJson<{ bands?: unknown }>(system, user, [{ mime, base64 }]);
       rawBands = parsed.bands;
     } catch (err) {
+      if (err instanceof AiConfigError) throw err;
       console.error("[api/ocr/layout] JSON path failed, using loose scanner:", err);
       // last resort: one more raw call parsed by the loose band scanner
       try {

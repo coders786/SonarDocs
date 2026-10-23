@@ -3,7 +3,7 @@ import { db, ensureDb } from "@/lib/db";
 import { cropBand } from "@/lib/imagetools";
 import { buildReadSystemPrompt, buildReadUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
-import { visionJson } from "@/lib/zai";
+import { AiConfigError, visionJson } from "@/lib/zai";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

@@ -23,7 +23,7 @@ async function createZai(): Promise<ZaiClient> {
     return await ZAI.create();
   } catch (err) {
     if (/configuration file/i.test(err instanceof Error ? err.message : String(err))) {
-      throw new Error(
+      throw new AiConfigError(
         "AI client is not configured on this host. Set the ZAI_BASE_URL and ZAI_API_KEY environment variables (Project → Settings → Environment Variables), then redeploy. Any chat-completions + vision compatible endpoint works.",
       );
     }
@@ -162,10 +162,18 @@ export function extractJson<T = unknown>(raw: string): T {
   throw new Error(`Could not parse JSON from model response: ${raw.slice(0, 300)}`);
 }
 
+/** Error thrown when the AI client itself is not configured (env/missing). */
+export class AiConfigError extends Error {}
+
 /** Detect rate-limit errors so callers can back off. */
 function isRateLimitError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /429|too many requests|rate limit/i.test(msg);
+}
+
+/** Config errors must not be retried — surface them immediately. */
+function isConfigError(err: unknown): boolean {
+  return err instanceof AiConfigError || /not configured|configuration file/i.test(err instanceof Error ? err.message : String(err));
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -196,6 +204,7 @@ export async function visionJson<T>(
       );
     } catch (err) {
       lastError = err;
+      if (isConfigError(err)) throw err; // no point retrying
       if (isRateLimitError(err) && rateLimited < 3) {
         rateLimited++;
         await sleep(15000 * rateLimited);
@@ -229,6 +238,7 @@ export async function textJson<T>(system: string, user: string, opts: { retries?
       );
     } catch (err) {
       lastError = err;
+      if (isConfigError(err)) throw err; // no point retrying
       if (isRateLimitError(err) && rateLimited < 3) {
         rateLimited++;
         await sleep(15000 * rateLimited);

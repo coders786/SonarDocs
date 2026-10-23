@@ -8,7 +8,7 @@ import {
 } from "@/lib/doc-prompts";
 import type { SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
-import { extractJson, textJson } from "@/lib/zai";
+import { AiConfigError, extractJson, textJson } from "@/lib/zai";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -111,6 +111,7 @@ export async function POST(req: NextRequest) {
       if (!title && parsed.title) title = String(parsed.title).trim();
       blocks = normalizeBlocks(parsed.blocks);
     } catch (err) {
+      if (err instanceof AiConfigError) throw err;
       console.error("[api/document] model failed:", err);
       // graceful fallback: a plain transcript document without AI rewriting
       title = title || "Transcript";

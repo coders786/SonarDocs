@@ -3,7 +3,7 @@ import { db, ensureDb } from "@/lib/db";
 import { cropBand } from "@/lib/imagetools";
 import { buildReadSystemPrompt, buildReadUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
-import { visionJson } from "@/lib/zai";
+import { AiConfigError, visionJson } from "@/lib/zai";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -129,6 +129,7 @@ export async function POST(req: NextRequest) {
       const parsed = await visionJson<{ readings?: Reading[] }>(system, user, images);
       if (Array.isArray(parsed.readings)) readings = parsed.readings;
     } catch (err) {
+      if (err instanceof AiConfigError) throw err;
       console.error("[api/ocr/read] model failed:", err);
       throw new Error("The OCR model failed to respond for these bands. Please retry them.");
     }
