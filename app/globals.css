@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+html, body, *, *::before, *::after {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans Arabic", "Geeza Pro", "Arial Unicode MS", "Tahoma", sans-serif;
+}
+
+[dir="rtl"],
+[dir="rtl"] * {
+  font-family: "Noto Sans Arabic", "Geeza Pro", "Arial Unicode MS", "Tahoma", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+body {
+  background-color: #F7F5FB;
+  color: #2B2740;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+nextjs-portal,
+[data-nextjs-toast] {
+  display: none !important;
+}
+
+@keyframes soft-glow {
+  0%, 100% {
+    box-shadow: 0 0 16px rgba(185, 166, 232, 0.4), 0 4px 12px rgba(46, 31, 77, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 28px rgba(185, 166, 232, 0.75), 0 6px 18px rgba(139, 111, 209, 0.28);
+  }
+}
+
+@keyframes mint-glow {
+  0%, 100% {
+    box-shadow: 0 0 14px rgba(168, 230, 201, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 26px rgba(168, 230, 201, 0.9);
+  }
+}
+
+.animate-soft-glow {
+  animation: soft-glow 3s ease-in-out infinite;
+}
+
+.animate-mint-glow {
+  animation: mint-glow 2.2s ease-in-out infinite;
+}
