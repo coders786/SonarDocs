@@ -164,6 +164,34 @@ export async function analyzePage(dataUrl: string): Promise<AnalyzeResult> {
 }
 
 /**
+ * Wrap a ready-made crop (produced by the Gemini code-execution sandbox) in
+ * the same shape cropBand() returns, so the read pass can treat both engines
+ * identically. inkRatio is -1 = "not measured" (never treated as blank).
+ */
+export async function sandboxCropVariant(dataUrl: string): Promise<CropResult> {
+  const { buffer, mime } = parseDataUrl(dataUrl);
+  const meta = await sharp(buffer).metadata();
+  let thumbBuf = buffer;
+  if (Math.max(meta.width || 0, meta.height || 0) > 640) {
+    thumbBuf = await sharp(buffer)
+      .resize(640, 640, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 78 })
+      .toBuffer();
+  } else if (mime.includes("png")) {
+    thumbBuf = await sharp(buffer).jpeg({ quality: 82 }).toBuffer();
+  }
+  return {
+    engine: "gemini-code-exec",
+    imageDataUrl: dataUrl,
+    thumbDataUrl: `data:image/jpeg;base64,${thumbBuf.toString("base64")}`,
+    width: meta.width || 0,
+    height: meta.height || 0,
+    upscale: 1,
+    inkRatio: -1,
+  };
+}
+
+/**
  * Crop + focus: extract a text band, upscale and enhance it.
  */
 export async function cropBand(

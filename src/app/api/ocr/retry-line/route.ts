@@ -4,6 +4,7 @@ import { cropBand } from "@/lib/imagetools";
 import { buildReadSystemPrompt, buildReadUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
 import { AiConfigError, visionJson } from "@/lib/zai";
+import { byokFromRequest } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,6 +25,7 @@ export async function POST(req: NextRequest) {
 
     const line = await db.transcriptionLine.findUnique({ where: { id: lineId }, include: { page: { include: { session: true } } } });
     if (!line) return NextResponse.json({ error: "Line not found" }, { status: 404 });
+    const byok = byokFromRequest(req);
 
     const article = await getArticle(line.page.session.subject);
     if (!article) return NextResponse.json({ error: "Research article missing" }, { status: 404 });
@@ -48,7 +50,7 @@ export async function POST(req: NextRequest) {
       system,
       user,
       [{ mime, base64: crop.imageDataUrl.split(",")[1] || "" }],
-      { subject: subject.subject, direction: subject.direction },
+      { subject: subject.subject, direction: subject.direction, apiKey: byok },
     );
     const r = parsed.readings?.[0] || {};
 

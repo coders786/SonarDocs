@@ -45,6 +45,7 @@ model OcrPage {
   width         Int?
   height        Int?
   bands         String? // JSON: python layout analysis result
+  sandboxCrops  String? // JSON: [{ order, dataUrl }] — crops produced by the Gemini code-execution sandbox
   createdAt     DateTime @default(now())
   lines         TranscriptionLine[]
 }

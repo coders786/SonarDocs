@@ -8,6 +8,7 @@ import {
   Loader2,
   PenLine,
   ScanText,
+  Settings2,
   Sparkles,
   Waves,
 } from "lucide-react";
@@ -18,6 +19,7 @@ import ProcessingStep from "./ProcessingStep";
 import VerifyStep from "./VerifyStep";
 import DocumentStep from "./DocumentStep";
 import ResearchLibrary from "./ResearchLibrary";
+import { EngineSettings } from "./EngineSettings";
 import { Button } from "@/components/ui/button";
 
 const STEPS = [
@@ -37,7 +39,9 @@ export default function SonarApp() {
   const setActivePage = useSonar((s) => s.setActivePage);
   const setDocument = useSonar((s) => s.setDocument);
   const reset = useSonar((s) => s.reset);
+  const geminiKey = useSonar((s) => s.geminiKey);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [engineOpen, setEngineOpen] = useState(false);
 
   useEffect(() => {
     if (!articlesLoaded) {
@@ -141,6 +145,22 @@ export default function SonarApp() {
             <Button
               variant="outline"
               size="sm"
+              onClick={() => setEngineOpen(true)}
+              className={`relative gap-1.5 border-stone-300 bg-white/70 hover:bg-amber-50 hover:text-amber-900 ${
+                geminiKey ? "border-amber-300 text-amber-900" : ""
+              }`}
+              aria-label="AI engine settings (bring your own Gemini key)"
+              title="AI engine settings — bring your own Gemini key"
+            >
+              <Settings2 className="h-4 w-4" aria-hidden />
+              <span className="hidden sm:inline">Engine</span>
+              {geminiKey && (
+                <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-amber-600" aria-hidden />
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => setLibraryOpen(true)}
               className="gap-1.5 border-stone-300 bg-white/70 hover:bg-amber-50 hover:text-amber-900"
             >
@@ -207,6 +227,7 @@ export default function SonarApp() {
       </footer>
 
       <ResearchLibrary open={libraryOpen} onOpenChange={setLibraryOpen} />
+      <EngineSettings open={engineOpen} onOpenChange={setEngineOpen} />
     </div>
   );
 }

@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import type { BandDecision, DocBlock, OcrLine, PageState, SessionState, SonarDocument, SubjectSummary } from "./types";
+import { initGeminiKey, setGeminiKey as persistGeminiKey } from "./types";
 
 export type Step = "setup" | "processing" | "verify" | "document";
 
@@ -44,6 +45,7 @@ type SonarState = {
   document: SonarDocument | null;
   generating: boolean;
   exporting: boolean;
+  geminiKey: string; // BYOK — client-side only, sent per request
 
   setStep: (step: Step) => void;
   setArticles: (articles: SubjectSummary[]) => void;
@@ -59,6 +61,7 @@ type SonarState = {
   setDocument: (doc: SonarDocument | null) => void;
   setGenerating: (b: boolean) => void;
   setExporting: (b: boolean) => void;
+  setGeminiKey: (key: string) => void;
   reset: () => void;
 };
 
@@ -94,6 +97,7 @@ export const useSonar = create<SonarState>((set) => ({
   document: null,
   generating: false,
   exporting: false,
+  geminiKey: initGeminiKey(),
 
   setStep: (step) => set({ step }),
   setArticles: (articles) => set({ articles, articlesLoaded: true }),
@@ -118,6 +122,7 @@ export const useSonar = create<SonarState>((set) => ({
   setActiveBand: (activeBand) => set({ activeBand }),
   setDocument: (document) => set({ document }),
   setGenerating: (generating) => set({ generating }),
+  setGeminiKey: (key) => set({ geminiKey: persistGeminiKey(key) }),
   setExporting: (exporting) => set({ exporting }),
   reset: () =>
     set({

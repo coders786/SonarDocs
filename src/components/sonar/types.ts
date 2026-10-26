@@ -150,10 +150,54 @@ function safeJsonArray(s: string | AltReading[] | null): AltReading[] {
   return Array.isArray(v) ? (v as AltReading[]) : [];
 }
 
+/* ---------------- BYOK: user's own Gemini key ---------------- */
+
+/**
+ * BYOK (bring your own key). The Gemini key lives in the browser's
+ * localStorage only — it is sent per-request in the `x-gemini-key` header and
+ * is never persisted server-side. When present it overrides the server's
+ * env key for every AI call.
+ */
+const GEMINI_KEY_STORAGE = "sonar.gemini-key";
+let geminiKey = "";
+
+export function initGeminiKey(): string {
+  if (typeof window !== "undefined") {
+    try {
+      geminiKey = window.localStorage.getItem(GEMINI_KEY_STORAGE) || "";
+    } catch {
+      geminiKey = "";
+    }
+  }
+  return geminiKey;
+}
+
+export function getGeminiKey(): string {
+  return geminiKey;
+}
+
+export function setGeminiKey(key: string): string {
+  geminiKey = String(key || "").trim();
+  if (typeof window !== "undefined") {
+    try {
+      if (geminiKey) window.localStorage.setItem(GEMINI_KEY_STORAGE, geminiKey);
+      else window.localStorage.removeItem(GEMINI_KEY_STORAGE);
+    } catch {
+      /* storage unavailable */
+    }
+  }
+  return geminiKey;
+}
+
+function authHeaders(): Record<string, string> {
+  initGeminiKey();
+  return geminiKey ? { "x-gemini-key": geminiKey } : {};
+}
+
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
@@ -164,7 +208,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 async function put<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
@@ -173,13 +217,27 @@ async function put<T>(url: string, body: unknown): Promise<T> {
 }
 
 async function get<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: authHeaders() });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
   return data as T;
 }
 
 export const api = {
+  /** Validate a Gemini key (defaults to the stored one) with a one-token ping. */
+  testEngine: (key?: string): Promise<{ ok: boolean; error?: string; model: string }> => {
+    initGeminiKey();
+    const k = (key || geminiKey).trim();
+    return fetch("/api/engine/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(k ? { "x-gemini-key": k } : {}) },
+      body: "{}",
+    }).then(async (res) => {
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; model?: string };
+      if (!res.ok && !data.error) return { ok: false, error: `Request failed (${res.status})`, model: "" };
+      return { ok: !!data.ok, error: data.error, model: data.model || "" };
+    });
+  },
   listArticles: () => get<{ articles: SubjectSummary[] }>("/api/research"),
   getArticle: (subject: string) => get<{ article: Article }>(`/api/research?subject=${encodeURIComponent(subject)}`),
   saveArticle: (payload: { subject: string; title: string; content: string }) =>

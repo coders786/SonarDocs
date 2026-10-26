@@ -16,8 +16,8 @@ export { engineForSubject, geminiEnabled } from "@/lib/gemini";
  *      (rate limits, outages) so a running pipeline never breaks.
  */
 
-/** Per-call engine hints threaded from the routes (which know the session subject). */
-export type EngineHints = { subject?: string; direction?: "rtl" | "ltr" };
+/** Per-call engine hints threaded from the routes (which know the session subject + BYOK key). */
+export type EngineHints = { subject?: string; direction?: "rtl" | "ltr"; apiKey?: string };
 
 /** The SDK client instance type (constructor is private, so infer from create()). */
 type ZaiClient = Awaited<ReturnType<typeof ZAI.create>>;
@@ -79,10 +79,10 @@ export async function visionChat(
   images: VisionImage[],
   opts: { thinking?: boolean } & EngineHints = {},
 ): Promise<string> {
-  if (geminiEnabled()) {
+  if (geminiEnabled(opts.apiKey)) {
     try {
       const engine = engineForSubject(opts.subject || "", opts.direction || "ltr");
-      const res = await geminiGenerate({ system, user, images, engine });
+      const res = await geminiGenerate({ system, user, images, engine, apiKey: opts.apiKey });
       return res.text;
     } catch (err) {
       console.warn("[ai] Gemini vision call failed — falling back to Z.ai:", err instanceof Error ? err.message : err);
@@ -108,10 +108,10 @@ export async function visionChat(
  * Gemini first (when configured, subject-matched engine), Z.ai fallback.
  */
 export async function textChat(system: string, user: string, opts: EngineHints = {}): Promise<string> {
-  if (geminiEnabled()) {
+  if (geminiEnabled(opts.apiKey)) {
     try {
       const engine = engineForSubject(opts.subject || "", opts.direction || "ltr");
-      const res = await geminiGenerate({ system, user, engine });
+      const res = await geminiGenerate({ system, user, engine, apiKey: opts.apiKey });
       return res.text;
     } catch (err) {
       console.warn("[ai] Gemini text call failed — falling back to Z.ai:", err instanceof Error ? err.message : err);
@@ -243,7 +243,7 @@ export async function visionJson<T>(
           ? user
           : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object, double-checking that every key and value is properly quoted and separated.`,
         images,
-        { subject: opts.subject, direction: opts.direction },
+        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey },
       );
     } catch (err) {
       lastError = err;
@@ -282,7 +282,7 @@ export async function textJson<T>(
         attempt === 0
           ? user
           : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object.`,
-        { subject: opts.subject, direction: opts.direction },
+        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey },
       );
     } catch (err) {
       lastError = err;

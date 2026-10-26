@@ -9,6 +9,7 @@ import {
 import type { SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
 import { AiConfigError, extractJson, textJson } from "@/lib/zai";
+import { byokFromRequest } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -110,6 +111,7 @@ export async function POST(req: NextRequest) {
       const parsed = await textJson<{ title?: string; blocks?: unknown }>(system, user, {
         subject: subject.subject,
         direction: subject.direction,
+        apiKey: byokFromRequest(req),
       });
       if (!title && parsed.title) title = String(parsed.title).trim();
       blocks = normalizeBlocks(parsed.blocks);

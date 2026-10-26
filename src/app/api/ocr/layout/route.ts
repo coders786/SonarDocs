@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, ensureDb } from "@/lib/db";
-import { AiConfigError, visionChat, visionJson } from "@/lib/zai";
+import { AiConfigError, extractJson, visionChat, visionJson } from "@/lib/zai";
+import { byokFromRequest, engineForSubject, geminiEnabled, sandboxAnalyzePage } from "@/lib/gemini";
 import { buildLayoutSystemPrompt, buildLayoutUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
 
@@ -142,10 +143,83 @@ function parseBandsLoose(raw: string): BandDecision[] {
 }
 
 /**
+ * Prompt for the Gemini code-execution sandbox: the model itself writes and
+ * runs the page analysis + cropping code (OpenCV in Google's sandbox) and
+ * hands back measured band geometry (JSON) plus every crop as an output
+ * image. This replaces the local python scripts when a Gemini key is active.
+ */
+const SANDBOX_ANALYSIS_PROMPT = `Analyze the attached page image by writing Python and running it in your code execution sandbox.
+The image file is available in your sandbox — discover its path (os.listdir / glob) and open it with cv2.imdecode or PIL.
+
+Run code that does exactly this:
+1. Load the image; convert to grayscale for measurements.
+2. Estimate and correct skew with a projection-profile search over -6..6 degrees.
+3. Binarize with adaptive thresholding (ink = white), then REMOVE long horizontal ruling/table lines (morphological opening with a wide horizontal kernel, then subtract).
+4. Detect every text-line ROW: horizontal ink projection on the cleaned mask; smooth; merge small gaps. Aim for individual visual lines; for connected Arabic/Nastaliq diagonal stacking, keep whole words together and never over-split mid-word.
+5. For each row, in strict top-to-bottom reading order i = 0,1,2,...:
+   - measure the tight bounding box (x, y, w, h) in pixels of the deskewed image;
+   - crop with ~12px padding, enhance (CLAHE + percentile contrast stretch + unsharp), upscale ~2.5x (cap width 1400px);
+   - save it with cv2.imwrite as band_<i>.png.
+6. Finally respond with ONLY this JSON object (no code fences, no prose):
+   {"pageWidth": <int>, "pageHeight": <int>, "deskewAngle": <float>, "bands": [{"index": <int>, "box": {"x": <int>, "y": <int>, "w": <int>, "h": <int>}, "kind": "text"|"heading"|"math"|"ignore"}]}
+   bands MUST be in the same top-to-bottom order as the saved band_<i>.png files and bands[i].index MUST equal i.
+
+Do NOT transcribe or read any text — geometry and crops only.`;
+
+type SandboxBand = { index: number; box: { x: number; y: number; w: number; h: number }; kind: string };
+
+/** Parse + validate the sandbox analysis JSON and pair bands with returned crops. */
+function parseSandboxAnalysis(
+  raw: string,
+  crops: Array<{ mime: string; base64: string }>,
+  pageW: number,
+  pageH: number,
+): { bands: SandboxBand[]; crops: Array<{ mime: string; base64: string }> } | null {
+  let parsed: {
+    pageWidth?: number;
+    pageHeight?: number;
+    bands?: Array<{ index?: number; box?: { x?: number; y?: number; w?: number; h?: number }; kind?: string }>;
+  };
+  try {
+    parsed = extractJson<typeof parsed>(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed.bands) || parsed.bands.length === 0 || parsed.bands.length > 80) return null;
+  const bands: SandboxBand[] = [];
+  for (const b of parsed.bands) {
+    const bx = Number(b?.box?.x), by = Number(b?.box?.y), bw = Number(b?.box?.w), bh = Number(b?.box?.h);
+    if (![bx, by, bw, bh].every((v) => Number.isFinite(v))) continue;
+    if (bw < 8 || bh < 6) continue;
+    const x = Math.max(0, Math.min(pageW - 8, Math.round(bx)));
+    const y = Math.max(0, Math.min(pageH - 8, Math.round(by)));
+    const w = Math.max(8, Math.min(pageW - x, Math.round(bw)));
+    const h = Math.max(6, Math.min(pageH - y, Math.round(bh)));
+    const kind = ["text", "heading", "list", "math", "ignore"].includes(String(b?.kind)) ? String(b?.kind) : "text";
+    bands.push({ index: bands.length, box: { x, y, w, h }, kind });
+  }
+  if (bands.length === 0) return null;
+  // pair crops by production order; only trust them when the count matches
+  const paired = crops.length === bands.length ? crops : [];
+  return { bands, crops: paired };
+}
+
+/**
  * POST /api/ocr/layout  { pageId }
- * VLM pass 1: the model sees the (overlay-annotated) page together with the
- * subject's FULL research article in its system prompt, and returns the
- * final text-band decisions (boxes in page pixel coordinates).
+ *
+ * Pass 1 — layout. Two engines:
+ *
+ * A) GEMINI SANDBOX (when a Gemini key is active, BYOK or env): the page is
+ *    uploaded to Google and the model runs OpenCV code in its code-execution
+ *    sandbox — deskew, ruling-line removal, row detection, per-line enhanced
+ *    crops. It returns measured band boxes (JSON) and the crops themselves
+ *    as output images. Deterministic geometry from real pixel measurements,
+ *    computed by the model's own code rather than our local scripts.
+ *
+ * B) LOCAL PYTHON + VLM PASS (fallback, and for non-Gemini setups): python
+ *    candidates from the analyze step + the VLM layout pass reconciled onto
+ *    python's precise rows (deterministic geometry, model contributes
+ *    semantics only).
  */
 export async function POST(req: NextRequest) {
   try {
@@ -170,8 +244,75 @@ export async function POST(req: NextRequest) {
       direction: article.direction,
     };
 
+    const byok = byokFromRequest(req);
+
     const bandsData = page.bands ? JSON.parse(page.bands) : { candidates: [], engine: "none", decisions: null };
     const candidateCount = Array.isArray(bandsData.candidates) ? bandsData.candidates.length : 0;
+
+    // ---- engine A: Gemini code-execution sandbox analysis + cropping ------
+    if (geminiEnabled(byok)) {
+      const img = page.imageBase64 || page.overlayBase64 || "";
+      const mime = img.slice(5, img.indexOf(";")) || "image/jpeg";
+      const base64 = img.split(",")[1] || "";
+      if (base64) {
+        try {
+          const engine = engineForSubject(subject.subject, subject.direction);
+          const sandbox = await sandboxAnalyzePage({
+            system: "You are a precise document-image analysis engine. You write and run Python (OpenCV/numpy) in your code sandbox and follow the output format exactly.",
+            user: SANDBOX_ANALYSIS_PROMPT,
+            pageBase64: base64,
+            pageMime: mime,
+            engine,
+            apiKey: byok,
+          });
+          const pageW = page.width || 1600;
+          const pageH = page.height || 1200;
+          const parsedSandbox = parseSandboxAnalysis(sandbox.text, sandbox.crops, pageW, pageH);
+          if (parsedSandbox) {
+            const decisions = parsedSandbox.bands.map((b) => ({
+              index: b.index,
+              box: b.box,
+              kind: b.kind,
+              preliminary: "",
+              needsZoom: b.box.h < 22,
+              reason: "gemini code-execution sandbox (measured)",
+            }));
+            const sandboxCrops = parsedSandbox.crops.map((c, i) => ({
+              order: decisions[i].index,
+              dataUrl: `data:${c.mime};base64,${c.base64}`,
+            }));
+            const updatedBands = JSON.stringify({
+              ...(bandsData || {}),
+              decisions,
+              engine: "gemini-code-exec",
+              deskewAngle: (() => {
+                try {
+                  const j = extractJson<{ deskewAngle?: number }>(sandbox.text);
+                  return Number(j.deskewAngle) || 0;
+                } catch {
+                  return 0;
+                }
+              })(),
+            });
+            await db.ocrPage.update({
+              where: { id: pageId },
+              data: { bands: updatedBands, sandboxCrops: sandboxCrops.length ? JSON.stringify(sandboxCrops) : null, status: "processing" },
+            });
+            await db.transcriptionLine.deleteMany({ where: { pageId } });
+            return NextResponse.json({
+              engine: "gemini-code-exec",
+              bands: decisions,
+              sandboxCrops: sandboxCrops.length,
+              articleWords: article.content.split(/\s+/).filter(Boolean).length,
+            });
+          }
+          console.warn("[api/ocr/layout] sandbox analysis returned no usable bands — falling back to local pipeline");
+        } catch (err) {
+          if (err instanceof AiConfigError) throw err;
+          console.warn("[api/ocr/layout] sandbox analysis failed — falling back to local pipeline:", err instanceof Error ? err.message : err);
+        }
+      }
+    }
 
     const image = page.overlayBase64 || page.imageBase64;
     const mime = image.includes("image/png") ? "image/png" : "image/jpeg";
@@ -185,6 +326,7 @@ export async function POST(req: NextRequest) {
       const parsed = await visionJson<{ bands?: unknown }>(system, user, [{ mime, base64 }], {
         subject: subject.subject,
         direction: subject.direction,
+        apiKey: byok,
       });
       rawBands = parsed.bands;
     } catch (err) {
@@ -195,6 +337,7 @@ export async function POST(req: NextRequest) {
         const raw = await visionChat(system, user, [{ mime, base64 }], {
           subject: subject.subject,
           direction: subject.direction,
+          apiKey: byok,
         });
         const loose = parseBandsLoose(raw);
         if (loose.length > 0) {

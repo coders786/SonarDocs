@@ -60,9 +60,11 @@ def binarize_ink(gray: np.ndarray) -> np.ndarray:
 def estimate_skew(ink: np.ndarray) -> float:
     """Estimate page skew (degrees) from ink-pixel structure.
 
-    Uses the classic projection-profile search over a small angle range:
-    the correct angle maximizes the variance of the horizontal projection,
-    because straight text lines produce sharp dark/light bands.
+    Classic projection-profile search: the correct angle maximizes the
+    variance of the horizontal projection, because straight text lines
+    produce sharp dark/light bands. Two passes:
+      1. coarse scan (0.5° steps over ±7°) to land in the right valley;
+      2. fine scan (0.05° steps over best±0.75°) to sharpen the estimate.
     """
     h, w = ink.shape
     scale = min(1.0, 1200.0 / max(h, w))
@@ -72,15 +74,23 @@ def estimate_skew(ink: np.ndarray) -> float:
         small = ink
     if cv2.countNonZero(small) < 200:
         return 0.0
-    best_angle, best_var = 0.0, -1.0
-    for angle in np.arange(-5.0, 5.01, 0.25):
+
+    def score(angle: float) -> float:
         m = cv2.getRotationMatrix2D((small.shape[1] / 2, small.shape[0] / 2), angle, 1.0)
         rot = cv2.warpAffine(small, m, (small.shape[1], small.shape[0]), flags=cv2.INTER_NEAREST,
                              borderValue=0)
         proj = np.sum(rot, axis=1, dtype=np.float64)
-        var = float(np.var(proj))
-        if var > best_var:
-            best_var, best_angle = var, float(angle)
+        return float(np.var(proj))
+
+    best_angle, best_var = 0.0, -1.0
+    for angle in np.arange(-7.0, 7.01, 0.5):          # coarse
+        v = score(float(angle))
+        if v > best_var:
+            best_var, best_angle = v, float(angle)
+    for angle in np.arange(best_angle - 0.75, best_angle + 0.751, 0.05):  # fine
+        v = score(float(angle))
+        if v > best_var:
+            best_var, best_angle = v, float(angle)
     return best_angle
 
 
@@ -88,6 +98,24 @@ def rotate_page(img: np.ndarray, angle: float) -> np.ndarray:
     h, w = img.shape[:2]
     m = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
     return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+
+
+def remove_ruled_lines(ink: np.ndarray, page_w: int) -> np.ndarray:
+    """Remove long horizontal ruling/table lines from the ink mask.
+
+    Notebook pages are ruled; the rules fuse neighbouring text rows into one
+    blob and wreck the row profile (and the crops pick up the printed line).
+    A wide horizontal morphological opening isolates ink runs longer than
+    ~1/3 of the page width — printed rules, not handwriting — and they are
+    subtracted. Strokes that cross a rule get a thin cut, which is harmless:
+    the mask is only used for geometry, the crops always come from the
+    original grayscale image.
+    """
+    horiz = cv2.getStructuringElement(cv2.MORPH_RECT, (max(24, page_w // 3), 1))
+    lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, horiz)
+    if cv2.countNonZero(lines) == 0:
+        return ink
+    return cv2.subtract(ink, lines)
 
 
 def detect_line_bands(ink: np.ndarray, page_w: int) -> list:
@@ -149,16 +177,43 @@ def detect_line_bands(ink: np.ndarray, page_w: int) -> list:
     if in_run and len(rows_s) - start >= 7:
         runs.append((start, len(rows_s)))
 
-    # close tiny gaps (descender dips below threshold mid-row)
-    closed: list = []
+    if not runs:
+        return []
+
+    # --- 3. row-height-aware merge + split -----------------------------
+    heights = [y1 - y0 for (y0, y1) in runs]
+    med_h = float(np.median(heights))
+
+    # close gaps relative to the typical row height: descender dips and
+    # Nastaliq diagonal stacking leave sub-threshold valleys INSIDE one
+    # visual row (a fixed 4px merge used to split them apart)
+    merged: list = []
     for r in runs:
-        if closed and r[0] - closed[-1][1] <= 4:
-            closed[-1] = (closed[-1][0], r[1])
+        if merged and r[0] - merged[-1][1] <= max(4.0, med_h * 0.30):
+            merged[-1] = (merged[-1][0], r[1])
         else:
-            closed.append(list(r))
+            merged.append(list(r))
+
+    # split runs much taller than the median row (two+ rows fused): cut at
+    # the deepest valley of the smoothed profile within the safe interior
+    final: list = []
+    for (y0, y1) in merged:
+        h = y1 - y0
+        if med_h > 0 and h > med_h * 1.7:
+            margin = int(med_h * 0.6)
+            lo, hi = y0 + margin, y1 - margin
+            if hi - lo > 8:
+                seg = rows_s[lo:hi]
+                cut = lo + int(np.argmin(seg))
+                if cut - y0 >= med_h * 0.6 and y1 - cut >= med_h * 0.6:
+                    final.append((y0, cut))
+                    final.append((cut, y1))
+                    continue
+        final.append((y0, y1))
+    runs = final
 
     bands = []
-    for (y0, y1) in closed:
+    for (y0, y1) in runs:
         y1 = min(y1 + 1, ink.shape[0])
         band_mask = clean[y0:y1]
         cols = (band_mask > 0).sum(axis=0)
@@ -274,7 +329,10 @@ def cmd_analyze(args) -> dict:
         img = cv2.resize(img, (int(iw * scale), int(ih * scale)), interpolation=cv2.INTER_AREA)
     ih, iw = img.shape[:2]
 
-    ink = binarize_ink(to_gray(img))
+    # NOTE: ruling lines are kept for the skew estimate (they are perfectly
+    # horizontal when deskewed, which sharpens it) and removed afterwards —
+    # they must not drive the band detection.
+    ink = remove_ruled_lines(binarize_ink(to_gray(img)), iw)
     bands = detect_line_bands(ink, iw)
     # drop bands that are basically empty or absurdly tall (probably figures)
     bands = [b for b in bands if b["ink"] > 0.005 and b["h"] < ih * 0.5]

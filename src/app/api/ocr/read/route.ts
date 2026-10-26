@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, ensureDb } from "@/lib/db";
-import { cropBand } from "@/lib/imagetools";
+import { cropBand, sandboxCropVariant } from "@/lib/imagetools";
 import { buildReadSystemPrompt, buildReadUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
 import { AiConfigError, visionJson } from "@/lib/zai";
+import { byokFromRequest } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,6 +78,23 @@ export async function POST(req: NextRequest) {
     const article = await getArticle(page.session.subject);
     if (!article) return NextResponse.json({ error: "Research article missing for subject" }, { status: 404 });
 
+    const byok = byokFromRequest(req);
+
+    // crops produced by the Gemini code-execution sandbox (if this page was
+    // laid out with engine A) — used as the primary read sample per band
+    const sandboxMap = new Map<number, string>();
+    if (page.sandboxCrops) {
+      try {
+        for (const c of JSON.parse(page.sandboxCrops) as Array<{ order: number; dataUrl: string }>) {
+          if (Number.isFinite(c?.order) && typeof c?.dataUrl === "string" && c.dataUrl.startsWith("data:image/")) {
+            sandboxMap.set(Number(c.order), c.dataUrl);
+          }
+        }
+      } catch {
+        /* malformed — ignore, fall back to local crops */
+      }
+    }
+
     const subject: SubjectInfo = {
       subject: article.subject,
       language: article.language,
@@ -146,7 +164,17 @@ export async function POST(req: NextRequest) {
         return crop;
       }
 
-      const crops = await Promise.all(variantDefs.map((d) => cropWith(d)));
+      const sandboxUrl = sandboxMap.get(band.index);
+      let crops: CropVariant[];
+      if (sandboxUrl) {
+        // primary sample = the model's own sandbox crop (already deskewed,
+        // enhanced, upscaled by its code); remaining samples stay local
+        // independent zooms so the ensemble keeps its independence
+        crops = [await sandboxCropVariant(sandboxUrl)];
+        for (const d of variantDefs.slice(1)) crops.push(await cropWith(d));
+      } else {
+        crops = await Promise.all(variantDefs.map((d) => cropWith(d)));
+      }
       const primary = crops[0];
 
       // Blank primary crop → ignored placeholder, no model call at all.
@@ -218,7 +246,7 @@ export async function POST(req: NextRequest) {
               system,
               user,
               [{ mime, base64: crop.imageDataUrl.split(",")[1] || "" }],
-              { subject: subject.subject, direction: subject.direction },
+              { subject: subject.subject, direction: subject.direction, apiKey: byok },
             );
             const readings = Array.isArray(parsed.readings) ? parsed.readings : [];
             // index-first match with positional fallback (single band per
