@@ -218,6 +218,7 @@ export async function POST(req: NextRequest) {
               system,
               user,
               [{ mime, base64: crop.imageDataUrl.split(",")[1] || "" }],
+              { subject: subject.subject, direction: subject.direction },
             );
             const readings = Array.isArray(parsed.readings) ? parsed.readings : [];
             // index-first match with positional fallback (single band per

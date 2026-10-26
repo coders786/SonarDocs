@@ -71,3 +71,6 @@ worklog.md
 
 # runtime uploads (user images, not source)
 upload/
+
+# but DO track the example env documentation
+!.env.example

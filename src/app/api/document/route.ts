@@ -107,7 +107,10 @@ export async function POST(req: NextRequest) {
     let title = String(body.title || "").trim();
     let blocks: DocBlock[] = [];
     try {
-      const parsed = await textJson<{ title?: string; blocks?: unknown }>(system, user);
+      const parsed = await textJson<{ title?: string; blocks?: unknown }>(system, user, {
+        subject: subject.subject,
+        direction: subject.direction,
+      });
       if (!title && parsed.title) title = String(parsed.title).trim();
       blocks = normalizeBlocks(parsed.blocks);
     } catch (err) {

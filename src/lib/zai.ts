@@ -1,4 +1,23 @@
 import ZAI from "z-ai-web-dev-sdk";
+import { engineForSubject, geminiEnabled, geminiGenerate } from "@/lib/gemini";
+
+/** Re-exported so routes/UI can describe the active engine without importing the module twice. */
+export { engineForSubject, geminiEnabled } from "@/lib/gemini";
+
+/**
+ * Multi-provider AI gateway.
+ *
+ * Provider priority:
+ *   1. Gemini — active when GEMINI_API_KEY (or GOOGLE_API_KEY) is set. Model,
+ *      thinking level and code execution are chosen per subject
+ *      (see src/lib/gemini.ts).
+ *   2. Z.ai SDK — the always-available fallback. Used directly when Gemini is
+ *      not configured, and used to absorb individual Gemini failures
+ *      (rate limits, outages) so a running pipeline never breaks.
+ */
+
+/** Per-call engine hints threaded from the routes (which know the session subject). */
+export type EngineHints = { subject?: string; direction?: "rtl" | "ltr" };
 
 /** The SDK client instance type (constructor is private, so infer from create()). */
 type ZaiClient = Awaited<ReturnType<typeof ZAI.create>>;
@@ -51,13 +70,24 @@ export function imageContentPart(img: VisionImage) {
  * Run a vision chat completion. The system prompt carries the subject's full
  * research article; user prompt carries the task; images are passed as
  * base64 data URLs.
+ *
+ * Gemini first (when configured, subject-matched engine), Z.ai fallback.
  */
 export async function visionChat(
   system: string,
   user: string,
   images: VisionImage[],
-  opts: { thinking?: boolean } = {},
+  opts: { thinking?: boolean } & EngineHints = {},
 ): Promise<string> {
+  if (geminiEnabled()) {
+    try {
+      const engine = engineForSubject(opts.subject || "", opts.direction || "ltr");
+      const res = await geminiGenerate({ system, user, images, engine });
+      return res.text;
+    } catch (err) {
+      console.warn("[ai] Gemini vision call failed — falling back to Z.ai:", err instanceof Error ? err.message : err);
+    }
+  }
   const zai = await getZai();
   const content: Array<Record<string, unknown>> = [{ type: "text", text: user }];
   for (const img of images) content.push(imageContentPart(img));
@@ -73,8 +103,20 @@ export async function visionChat(
   return text;
 }
 
-/** Plain text chat completion (used by the document AI). */
-export async function textChat(system: string, user: string): Promise<string> {
+/**
+ * Plain text chat completion (used by the document AI).
+ * Gemini first (when configured, subject-matched engine), Z.ai fallback.
+ */
+export async function textChat(system: string, user: string, opts: EngineHints = {}): Promise<string> {
+  if (geminiEnabled()) {
+    try {
+      const engine = engineForSubject(opts.subject || "", opts.direction || "ltr");
+      const res = await geminiGenerate({ system, user, engine });
+      return res.text;
+    } catch (err) {
+      console.warn("[ai] Gemini text call failed — falling back to Z.ai:", err instanceof Error ? err.message : err);
+    }
+  }
   const zai = await getZai();
   const completion = await zai.chat.completions.create({
     messages: [
@@ -187,7 +229,7 @@ export async function visionJson<T>(
   system: string,
   user: string,
   images: VisionImage[],
-  opts: { retries?: number } = {},
+  opts: { retries?: number } & EngineHints = {},
 ): Promise<T> {
   const retries = opts.retries ?? 2;
   let lastError: unknown = null;
@@ -201,6 +243,7 @@ export async function visionJson<T>(
           ? user
           : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object, double-checking that every key and value is properly quoted and separated.`,
         images,
+        { subject: opts.subject, direction: opts.direction },
       );
     } catch (err) {
       lastError = err;
@@ -223,7 +266,11 @@ export async function visionJson<T>(
 }
 
 /** Text call that must return JSON — same retry behaviour. */
-export async function textJson<T>(system: string, user: string, opts: { retries?: number } = {}): Promise<T> {
+export async function textJson<T>(
+  system: string,
+  user: string,
+  opts: { retries?: number } & EngineHints = {},
+): Promise<T> {
   const retries = opts.retries ?? 2;
   let lastError: unknown = null;
   let rateLimited = 0;
@@ -235,6 +282,7 @@ export async function textJson<T>(system: string, user: string, opts: { retries?
         attempt === 0
           ? user
           : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object.`,
+        { subject: opts.subject, direction: opts.direction },
       );
     } catch (err) {
       lastError = err;

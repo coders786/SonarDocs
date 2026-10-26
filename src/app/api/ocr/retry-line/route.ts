@@ -48,6 +48,7 @@ export async function POST(req: NextRequest) {
       system,
       user,
       [{ mime, base64: crop.imageDataUrl.split(",")[1] || "" }],
+      { subject: subject.subject, direction: subject.direction },
     );
     const r = parsed.readings?.[0] || {};
 

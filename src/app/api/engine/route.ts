@@ -1,0 +1,31 @@
+import { NextResponse } from "next/server";
+import { engineForSubject, geminiEnabled } from "@/lib/gemini";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/**
+ * GET /api/engine
+ *
+ * Describes the AI engine assignment per subject so the UI can show which
+ * model + thinking level + tools each subject runs on. `gemini` is true when
+ * GEMINI_API_KEY is configured; otherwise every call falls back to the Z.ai
+ * SDK (the per-subject config still describes what Gemini WOULD be used).
+ */
+export async function GET() {
+  const subjects = ["sindhi", "urdu", "english", "mathematics"].map((s) => {
+    const e = engineForSubject(s, s === "sindhi" || s === "urdu" ? "rtl" : "ltr");
+    return {
+      subject: s,
+      model: e.model,
+      thinkingLevel: e.thinkingLevel,
+      codeExecution: e.codeExecution,
+      label: e.label,
+    };
+  });
+  return NextResponse.json({
+    gemini: geminiEnabled(),
+    fallback: "Z.ai SDK (set GEMINI_API_KEY to activate the Gemini engines)",
+    subjects,
+  });
+}

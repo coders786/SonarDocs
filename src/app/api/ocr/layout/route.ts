@@ -182,14 +182,20 @@ export async function POST(req: NextRequest) {
 
     let rawBands: unknown = null;
     try {
-      const parsed = await visionJson<{ bands?: unknown }>(system, user, [{ mime, base64 }]);
+      const parsed = await visionJson<{ bands?: unknown }>(system, user, [{ mime, base64 }], {
+        subject: subject.subject,
+        direction: subject.direction,
+      });
       rawBands = parsed.bands;
     } catch (err) {
       if (err instanceof AiConfigError) throw err;
       console.error("[api/ocr/layout] JSON path failed, using loose scanner:", err);
       // last resort: one more raw call parsed by the loose band scanner
       try {
-        const raw = await visionChat(system, user, [{ mime, base64 }]);
+        const raw = await visionChat(system, user, [{ mime, base64 }], {
+          subject: subject.subject,
+          direction: subject.direction,
+        });
         const loose = parseBandsLoose(raw);
         if (loose.length > 0) {
           rawBands = loose;

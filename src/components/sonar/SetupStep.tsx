@@ -12,6 +12,7 @@ import {
   Trash2,
   Type,
   X,
+  Zap,
 } from "lucide-react";
 import { useSonar } from "./store";
 import { api, fileToDownscaledDataUrl, type SubjectSummary } from "./types";
@@ -33,6 +34,24 @@ function SubjectIcon({ icon, className }: { icon: string; className?: string }) 
   }
 }
 
+type EngineSubjectConf = { subject: string; model: string; thinkingLevel: string; codeExecution: boolean; label: string };
+type EngineInfo = { gemini: boolean; subjects: EngineSubjectConf[] };
+
+/** Compact chip text for a subject's engine assignment (mirrors server rule for custom subjects). */
+function engineChip(a: SubjectSummary, info: EngineInfo | null): { text: string; active: boolean } | null {
+  if (!info) return null;
+  if (!info.gemini) return { text: "Z.ai fallback · add GEMINI_API_KEY", active: false };
+  const conf = info.subjects.find((s) => s.subject === a.subject);
+  if (conf) {
+    const [model, thinking] = conf.label.split("·").map((p) => p.trim());
+    return { text: `${model} · ${(thinking || "").replace(" thinking", "")} · code exec`, active: true };
+  }
+  // custom subject — same rule as engineForSubject(): custom RTL = hard engine
+  return a.direction === "rtl"
+    ? { text: "Gemini 3.5 Flash · medium · code exec", active: true }
+    : { text: "Gemini 3.5 Flash Lite · high · code exec", active: true };
+}
+
 export default function SetupStep() {
   const articles = useSonar((s) => s.articles);
   const subject = useSonar((s) => s.subject);
@@ -45,6 +64,7 @@ export default function SetupStep() {
 
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [engine, setEngine] = useState<EngineInfo | null>(null);
   const [recent, setRecent] = useState<Array<{ id: string; subject: string; status: string; updatedAt: string; pages: Array<{ id: string; status: string }> }>>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -53,6 +73,10 @@ export default function SetupStep() {
       .listSessions()
       .then((r) => setRecent(r.sessions.slice(0, 4)))
       .catch(() => setRecent([]));
+    fetch("/api/engine")
+      .then((r) => r.json())
+      .then((d: EngineInfo) => setEngine(d))
+      .catch(() => setEngine(null));
   }, []);
 
   const addFiles = useCallback(
@@ -158,6 +182,23 @@ export default function SetupStep() {
                   )}
                 </div>
                 <p className="mt-1 line-clamp-3 flex-1 text-xs leading-relaxed text-stone-500">{a.blurb}</p>
+                {(() => {
+                  const chip = engineChip(a, engine);
+                  if (!chip) return null;
+                  return (
+                    <div
+                      className={`mt-2 inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${
+                        chip.active
+                          ? "border-amber-200 bg-amber-50 text-amber-900"
+                          : "border-stone-200 bg-stone-50 text-stone-500"
+                      }`}
+                      title={`OCR + document AI engine for this subject${chip.active ? "" : " — set GEMINI_API_KEY in .env to activate the Gemini engines"}`}
+                    >
+                      <Zap className="h-3 w-3 shrink-0" aria-hidden />
+                      <span className="truncate">{chip.text}</span>
+                    </div>
+                  );
+})()}
                 <div className="mt-3 flex items-center justify-between">
                   <span className="text-[11px] font-medium text-amber-800">
                     {a.wordCount.toLocaleString()} words of research
