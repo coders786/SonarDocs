@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import sharp from "sharp";
 import { db, ensureDb } from "@/lib/db";
 import { AiConfigError, extractJson, visionChat, visionJson } from "@/lib/zai";
 import { byokFromRequest, engineForSubject, geminiEnabled, sandboxAnalyzePage } from "@/lib/gemini";
@@ -8,6 +9,37 @@ import { getArticle } from "@/lib/subjects";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+/**
+ * Budgets so this request ALWAYS answers inside the preview gateway's
+ * patience (the gateway 502s the browser when a request runs too long —
+ * the "layout took 2.3 minutes → Request failed (502)" bug).
+ */
+const LAYOUT_DEADLINE_MS = 50_000; // whole model phase must finish inside this
+const LAYOUT_ATTEMPT_MS = 35_000; // one model call at most this long
+
+/**
+ * Layout only needs band GEOMETRY + semantics — not fine glyph detail.
+ * Sending the full-size page made each vision call 2-3× slower; a 1100px
+ * JPEG answers far faster and every band box is later snapped onto
+ * python's precise rows anyway.
+ */
+async function downscaleForLayout(dataUrl: string): Promise<{ mime: string; base64: string }> {
+  try {
+    const base64 = dataUrl.split(",")[1] || "";
+    const buf = Buffer.from(base64, "base64");
+    const out = await sharp(buf, { failOn: "none" })
+      .rotate()
+      .resize({ width: 1100, withoutEnlargement: true })
+      .jpeg({ quality: 72 })
+      .toBuffer();
+    return { mime: "image/jpeg", base64: out.toString("base64") };
+  } catch {
+    // never let a decode hiccup break the pipeline — fall back to the original
+    const image = dataUrl;
+    return { mime: image.includes("image/png") ? "image/png" : "image/jpeg", base64: image.split(",")[1] || "" };
+  }
+}
 
 type BandDecision = {
   box: { x: number; y: number; w: number; h: number };
@@ -250,6 +282,7 @@ export async function POST(req: NextRequest) {
     const candidateCount = Array.isArray(bandsData.candidates) ? bandsData.candidates.length : 0;
 
     // ---- engine A: Gemini code-execution sandbox analysis + cropping ------
+    let sandboxFailed = false;
     if (geminiEnabled(byok)) {
       const img = page.imageBase64 || page.overlayBase64 || "";
       const mime = img.slice(5, img.indexOf(";")) || "image/jpeg";
@@ -264,6 +297,10 @@ export async function POST(req: NextRequest) {
             pageMime: mime,
             engine,
             apiKey: byok,
+            // the sandbox writes + runs code, which takes real time — but it
+            // must NOT eat the whole gateway budget, otherwise the fallback
+            // below never gets to answer and the browser gets a 502
+            timeoutMs: 45_000,
           });
           const pageW = page.width || 1600;
           const pageH = page.height || 1200;
@@ -307,50 +344,87 @@ export async function POST(req: NextRequest) {
             });
           }
           console.warn("[api/ocr/layout] sandbox analysis returned no usable bands — falling back to local pipeline");
+          sandboxFailed = true;
         } catch (err) {
           if (err instanceof AiConfigError) throw err;
           console.warn("[api/ocr/layout] sandbox analysis failed — falling back to local pipeline:", err instanceof Error ? err.message : err);
+          sandboxFailed = true;
         }
       }
     }
 
+    // When the Gemini sandbox already burned ~45s and python has candidate
+    // rows, do NOT fire another slow VLM call — that combination is exactly
+    // how this request used to exceed the gateway timeout (502). Python rows
+    // are precise geometry; the verify step provides the human semantics.
+    if (sandboxFailed && candidateCount > 0) {
+      const decisions: Array<BandDecision & { index: number }> = bandsData.candidates.map(
+        (c: { x: number; y: number; w: number; h: number }, i: number) => ({
+          box: clampBox(c, page.width || 1600, page.height || 1200),
+          kind: "text",
+          preliminary: "",
+          needsZoom: true,
+          reason: "python rows (sandbox unavailable)",
+          index: i,
+        }),
+      );
+      const updatedBands = JSON.stringify({ ...bandsData, decisions });
+      await db.ocrPage.update({ where: { id: pageId }, data: { bands: updatedBands } });
+      await db.transcriptionLine.deleteMany({ where: { pageId } });
+      return NextResponse.json({
+        engine: bandsData.engine || "none",
+        bands: decisions,
+        articleWords: article.content.split(/\s+/).filter(Boolean).length,
+      });
+    }
+
     const image = page.overlayBase64 || page.imageBase64;
-    const mime = image.includes("image/png") ? "image/png" : "image/jpeg";
-    const base64 = image.split(",")[1] || "";
+    const modelImage = await downscaleForLayout(image);
 
     const system = buildLayoutSystemPrompt(article.content, subject);
     const user = buildLayoutUserPrompt(subject, candidateCount);
+    const modelPhaseStartedAt = Date.now();
 
     let rawBands: unknown = null;
     try {
-      const parsed = await visionJson<{ bands?: unknown }>(system, user, [{ mime, base64 }], {
+      const parsed = await visionJson<{ bands?: unknown }>(system, user, [modelImage], {
         subject: subject.subject,
         direction: subject.direction,
         apiKey: byok,
+        retries: 1,
+        timeoutMs: LAYOUT_ATTEMPT_MS,
+        deadlineMs: LAYOUT_DEADLINE_MS,
       });
       rawBands = parsed.bands;
     } catch (err) {
       if (err instanceof AiConfigError) throw err;
-      console.error("[api/ocr/layout] JSON path failed, using loose scanner:", err);
-      // last resort: one more raw call parsed by the loose band scanner
-      try {
-        const raw = await visionChat(system, user, [{ mime, base64 }], {
-          subject: subject.subject,
-          direction: subject.direction,
-          apiKey: byok,
-        });
-        const loose = parseBandsLoose(raw);
-        if (loose.length > 0) {
-          rawBands = loose;
-        } else if (candidateCount > 0) {
-          rawBands = null; // fall back to python candidates below
-        } else {
-          throw new Error("no bands detected");
+      console.error("[api/ocr/layout] JSON path failed:", err instanceof Error ? err.message : err);
+      // One more raw call parsed by the loose band scanner — but ONLY when
+      // python found no candidate rows (otherwise python's rows are already
+      // the authoritative geometry and a second slow model call would just
+      // push the request past the gateway timeout → 502 for the user).
+      if (candidateCount === 0) {
+        const left = LAYOUT_DEADLINE_MS - (Date.now() - modelPhaseStartedAt);
+        if (left < 6_000) throw new Error("Layout model too slow — please try again.");
+        try {
+          const raw = await visionChat(system, user, [modelImage], {
+            subject: subject.subject,
+            direction: subject.direction,
+            apiKey: byok,
+            timeoutMs: left,
+          });
+          const loose = parseBandsLoose(raw);
+          if (loose.length > 0) {
+            rawBands = loose;
+          } else {
+            throw new Error("no bands detected");
+          }
+        } catch (secondErr) {
+          console.error("[api/ocr/layout] loose scan failed:", secondErr);
+          throw new Error("The layout model failed to return a usable response. Please try again.");
         }
-      } catch (secondErr) {
-        console.error("[api/ocr/layout] loose scan failed:", secondErr);
-        throw new Error("The layout model failed to return a usable response. Please try again.");
       }
+      // with candidates present: fall through — python rows become the bands below
     }
 
     const width = page.width || 1600;

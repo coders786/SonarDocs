@@ -112,6 +112,12 @@ export async function POST(req: NextRequest) {
         subject: subject.subject,
         direction: subject.direction,
         apiKey: byokFromRequest(req),
+        // whole-document generation is the single slowest text call in the
+        // app — bound it so the browser never gets a gateway 502; on timeout
+        // the catch below degrades to a plain transcript document
+        retries: 1,
+        timeoutMs: 50_000,
+        deadlineMs: 55_000,
       });
       if (!title && parsed.title) title = String(parsed.title).trim();
       blocks = normalizeBlocks(parsed.blocks);

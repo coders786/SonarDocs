@@ -26,7 +26,6 @@ const STAGE_META = {
 export default function ProcessingStep() {
   const subject = useSonar((s) => s.subject);
   const uploads = useSonar((s) => s.uploads);
-  const sessionId = useSonar((s) => s.sessionId);
   const setSession = useSonar((s) => s.setSession);
   const patchPage = useSonar((s) => s.patchSessionPage);
   const setProgress = useSonar((s) => s.setProgress);
@@ -41,6 +40,8 @@ export default function ProcessingStep() {
   const [fatal, setFatal] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
   const startedRef = useRef(false);
+  const runningRef = useRef(false);
+  const failedIndexRef = useRef(0);
 
   /** run one full page: start → layout → read batches */
   const runPage = useCallback(
@@ -145,13 +146,20 @@ export default function ProcessingStep() {
     [subject, log, setProgress, setSession],
   );
 
-  useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    (async () => {
+  /**
+   * The full pipeline, restartable. A failure NEVER dead-ends the UI: the
+   * fatal banner exposes "Try again" which resumes from the failed page.
+   * Safe to re-run because /api/ocr/start upserts by (sessionId, index).
+   */
+  const startPipeline = useCallback(
+    async (fromIndex: number) => {
+      if (runningRef.current) return;
+      runningRef.current = true;
+      setFatal(null);
       try {
-        let sid = sessionId;
-        for (let i = 0; i < uploads.length; i++) {
+        let sid = useSonar.getState().sessionId;
+        for (let i = Math.max(0, fromIndex); i < uploads.length; i++) {
+          failedIndexRef.current = i;
           await runPage(uploads[i], i, sid);
           // runPage() stores the session via setSession, so read the id back
           sid = useSonar.getState().sessionId ?? sid;
@@ -165,10 +173,18 @@ export default function ProcessingStep() {
         console.error(err);
         setFatal((err as Error).message);
         log(`pipeline stopped: ${(err as Error).message}`, "err");
+      } finally {
+        runningRef.current = false;
       }
-    })();
-     
-  }, []);
+    },
+    [uploads, runPage, log, setSession, setActivePage, setStep],
+  );
+
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    void startPipeline(0);
+  }, [startPipeline]);
 
   const retryFailed = useCallback(async () => {
     const sid = useSonar.getState().sessionId;
@@ -223,9 +239,12 @@ export default function ProcessingStep() {
         </div>
         {fatal && (
           <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
-            <AlertTriangle className="h-4 w-4" aria-hidden />
-            {fatal}
-            <Button variant="outline" size="sm" onClick={() => setStep("setup")} className="ml-2">
+            <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden />
+            <span className="min-w-0 flex-1">{fatal}</span>
+            <Button size="sm" onClick={() => void startPipeline(failedIndexRef.current)} className="ml-2 shrink-0">
+              Try again
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setStep("setup")} className="shrink-0">
               Back
             </Button>
           </div>

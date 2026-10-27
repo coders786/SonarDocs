@@ -19,6 +19,30 @@ export { engineForSubject, geminiEnabled } from "@/lib/gemini";
 /** Per-call engine hints threaded from the routes (which know the session subject + BYOK key). */
 export type EngineHints = { subject?: string; direction?: "rtl" | "ltr"; apiKey?: string };
 
+/**
+ * Race a model promise against a hard deadline.
+ *
+ * WHY THIS EXISTS: every HTTP request from the browser passes through the
+ * preview gateway, which kills connections that stay idle too long and
+ * answers the client with a 502 — even though the server eventually
+ * finishes. A single vision call on a full page image can take 40-70s, and
+ * retry loops used to stack 3-4 of them inside ONE request (the "layout
+ * takes 2.3 minutes → Request failed (502)" bug). Every model call must
+ * therefore be individually bounded so the enclosing route can still
+ * degrade gracefully (e.g. fall back to python candidate bands) and answer
+ * in time.
+ *
+ * The loser of the race keeps running server-side (we cannot abort the SDK
+ * call), but the caller returns immediately.
+ */
+export function raceWithTimeout<T>(p: Promise<T>, ms: number, label = "model call"): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 /** The SDK client instance type (constructor is private, so infer from create()). */
 type ZaiClient = Awaited<ReturnType<typeof ZAI.create>>;
 
@@ -77,12 +101,16 @@ export async function visionChat(
   system: string,
   user: string,
   images: VisionImage[],
-  opts: { thinking?: boolean } & EngineHints = {},
+  opts: { thinking?: boolean; timeoutMs?: number } & EngineHints = {},
 ): Promise<string> {
   if (geminiEnabled(opts.apiKey)) {
     try {
       const engine = engineForSubject(opts.subject || "", opts.direction || "ltr");
-      const res = await geminiGenerate({ system, user, images, engine, apiKey: opts.apiKey });
+      const res = await raceWithTimeout(
+        geminiGenerate({ system, user, images, engine, apiKey: opts.apiKey, timeoutMs: opts.timeoutMs }),
+        opts.timeoutMs ?? 120_000,
+        "Gemini vision call",
+      );
       return res.text;
     } catch (err) {
       console.warn("[ai] Gemini vision call failed — falling back to Z.ai:", err instanceof Error ? err.message : err);
@@ -91,13 +119,17 @@ export async function visionChat(
   const zai = await getZai();
   const content: Array<Record<string, unknown>> = [{ type: "text", text: user }];
   for (const img of images) content.push(imageContentPart(img));
-  const completion = await zai.chat.completions.createVision({
-    messages: [
-      { role: "assistant", content: system },
-      { role: "user", content } as never,
-    ],
-    thinking: { type: opts.thinking ? "enabled" : "disabled" },
-  } as never);
+  const completion = await raceWithTimeout(
+    zai.chat.completions.createVision({
+      messages: [
+        { role: "assistant", content: system },
+        { role: "user", content } as never,
+      ],
+      thinking: { type: opts.thinking ? "enabled" : "disabled" },
+    } as never),
+    opts.timeoutMs ?? 90_000,
+    "vision model call",
+  );
   const text = completion.choices[0]?.message?.content;
   if (!text) throw new Error("Empty vision model response");
   return text;
@@ -107,24 +139,36 @@ export async function visionChat(
  * Plain text chat completion (used by the document AI).
  * Gemini first (when configured, subject-matched engine), Z.ai fallback.
  */
-export async function textChat(system: string, user: string, opts: EngineHints = {}): Promise<string> {
+export async function textChat(
+  system: string,
+  user: string,
+  opts: EngineHints & { timeoutMs?: number } = {},
+): Promise<string> {
   if (geminiEnabled(opts.apiKey)) {
     try {
       const engine = engineForSubject(opts.subject || "", opts.direction || "ltr");
-      const res = await geminiGenerate({ system, user, engine, apiKey: opts.apiKey });
+      const res = await raceWithTimeout(
+        geminiGenerate({ system, user, engine, apiKey: opts.apiKey, timeoutMs: opts.timeoutMs }),
+        opts.timeoutMs ?? 120_000,
+        "Gemini text call",
+      );
       return res.text;
     } catch (err) {
       console.warn("[ai] Gemini text call failed — falling back to Z.ai:", err instanceof Error ? err.message : err);
     }
   }
   const zai = await getZai();
-  const completion = await zai.chat.completions.create({
-    messages: [
-      { role: "assistant", content: system },
-      { role: "user", content: user },
-    ],
-    thinking: { type: "disabled" },
-  });
+  const completion = await raceWithTimeout(
+    zai.chat.completions.create({
+      messages: [
+        { role: "assistant", content: system },
+        { role: "user", content: user },
+      ],
+      thinking: { type: "disabled" },
+    }),
+    opts.timeoutMs ?? 90_000,
+    "text model call",
+  );
   const text = completion.choices[0]?.message?.content;
   if (!text) throw new Error("Empty model response");
   return text;
@@ -221,20 +265,39 @@ function isConfigError(err: unknown): boolean {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Options shared by the JSON-forcing wrappers.
+ *
+ * `timeoutMs` bounds ONE model attempt; `deadlineMs` bounds the WHOLE
+ * wrapper (all attempts combined) so callers can guarantee the enclosing
+ * HTTP request answers inside the preview gateway's patience.
+ */
+export type JsonCallOpts = { retries?: number; timeoutMs?: number; deadlineMs?: number } & EngineHints;
+
+/** Remaining budget in ms from `startedAt` until `deadlineMs`, minimum 0. */
+function remainingBudget(startedAt: number, deadlineMs?: number): number {
+  if (!deadlineMs || !Number.isFinite(deadlineMs)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, deadlineMs - (Date.now() - startedAt));
+}
+
+/**
  * Vision call that must return JSON — retries with feedback when the model
  * emits malformed JSON (a common failure mode with large system prompts) and
- * backs off on rate limits.
+ * backs off on rate limits. Hard-bounded by `timeoutMs`/`deadlineMs`.
  */
 export async function visionJson<T>(
   system: string,
   user: string,
   images: VisionImage[],
-  opts: { retries?: number } & EngineHints = {},
+  opts: JsonCallOpts = {},
 ): Promise<T> {
-  const retries = opts.retries ?? 2;
+  const retries = opts.retries ?? 1;
+  const startedAt = Date.now();
   let lastError: unknown = null;
   let rateLimited = 0;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const budget = remainingBudget(startedAt, opts.deadlineMs ?? opts.timeoutMs);
+    if (attempt > 0 && budget < 4_000) break; // no time for another round-trip
+    const attemptTimeout = Math.min(opts.timeoutMs ?? 90_000, budget) || 4_000;
     let raw = "";
     try {
       raw = await visionChat(
@@ -243,7 +306,7 @@ export async function visionJson<T>(
           ? user
           : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object, double-checking that every key and value is properly quoted and separated.`,
         images,
-        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey },
+        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey, timeoutMs: attemptTimeout },
       );
     } catch (err) {
       lastError = err;
@@ -266,15 +329,15 @@ export async function visionJson<T>(
 }
 
 /** Text call that must return JSON — same retry behaviour. */
-export async function textJson<T>(
-  system: string,
-  user: string,
-  opts: { retries?: number } & EngineHints = {},
-): Promise<T> {
-  const retries = opts.retries ?? 2;
+export async function textJson<T>(system: string, user: string, opts: JsonCallOpts = {}): Promise<T> {
+  const retries = opts.retries ?? 1;
+  const startedAt = Date.now();
   let lastError: unknown = null;
   let rateLimited = 0;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const budget = remainingBudget(startedAt, opts.deadlineMs ?? opts.timeoutMs);
+    if (attempt > 0 && budget < 4_000) break; // no time for another round-trip
+    const attemptTimeout = Math.min(opts.timeoutMs ?? 90_000, budget) || 4_000;
     let raw = "";
     try {
       raw = await textChat(
@@ -282,7 +345,7 @@ export async function textJson<T>(
         attempt === 0
           ? user
           : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object.`,
-        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey },
+        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey, timeoutMs: attemptTimeout },
       );
     } catch (err) {
       lastError = err;

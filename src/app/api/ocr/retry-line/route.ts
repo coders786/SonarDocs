@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
       system,
       user,
       [{ mime, base64: crop.imageDataUrl.split(",")[1] || "" }],
-      { subject: subject.subject, direction: subject.direction, apiKey: byok },
+      { subject: subject.subject, direction: subject.direction, apiKey: byok, retries: 1, timeoutMs: 40_000, deadlineMs: 45_000 },
     );
     const r = parsed.readings?.[0] || {};
 

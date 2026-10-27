@@ -54,18 +54,39 @@ export async function POST(req: NextRequest) {
       deskewAngle: analysis.deskewAngle,
     });
 
-    const page = await db.ocrPage.create({
-      data: {
-        sessionId,
-        index,
-        status: "processing",
-        imageBase64: analysis.pageDataUrl,
-        overlayBase64: analysis.overlayDataUrl,
-        width: analysis.width,
-        height: analysis.height,
-        bands,
-      },
-    });
+    // Upsert by (sessionId, index): a client-side retry after a transient
+    // failure (e.g. a gateway 502 mid-pipeline) must never create a duplicate
+    // page for the same upload slot.
+    const existing = await db.ocrPage.findFirst({ where: { sessionId, index } });
+    let page;
+    if (existing) {
+      await db.transcriptionLine.deleteMany({ where: { pageId: existing.id } });
+      page = await db.ocrPage.update({
+        where: { id: existing.id },
+        data: {
+          status: "processing",
+          imageBase64: analysis.pageDataUrl,
+          overlayBase64: analysis.overlayDataUrl,
+          width: analysis.width,
+          height: analysis.height,
+          bands,
+          sandboxCrops: null,
+        },
+      });
+    } else {
+      page = await db.ocrPage.create({
+        data: {
+          sessionId,
+          index,
+          status: "processing",
+          imageBase64: analysis.pageDataUrl,
+          overlayBase64: analysis.overlayDataUrl,
+          width: analysis.width,
+          height: analysis.height,
+          bands,
+        },
+      });
+    }
 
     return NextResponse.json({
       sessionId,

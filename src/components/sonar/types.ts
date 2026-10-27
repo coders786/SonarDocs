@@ -194,24 +194,85 @@ function authHeaders(): Record<string, string> {
   return geminiKey ? { "x-gemini-key": geminiKey } : {};
 }
 
+/**
+ * True for failures that are usually transient infrastructure, not the app:
+ * the preview gateway answering 502/503/504 (upstream busy or briefly cut),
+ * or the fetch itself rejecting (network blip). One quiet retry absorbs
+ * these without user-visible errors.
+ */
+function isTransientFailure(status: number): boolean {
+  return status === 502 || status === 503 || status === 504;
+}
+
 async function post<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    // network blip / gateway cut — one retry before giving up
+    await new Promise((r) => setTimeout(r, 900));
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+  }
+  let data: unknown = {};
+  try {
+    data = await res.json();
+  } catch {
+    /* empty body (e.g. raw gateway error page) */
+  }
+  if (!res.ok && isTransientFailure(res.status)) {
+    await new Promise((r) => setTimeout(r, 900));
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    try {
+      data = await res.json();
+    } catch {
+      /* keep {} */
+    }
+  }
   if (!res.ok) throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
   return data as T;
 }
 
 async function put<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
+  const doFetch = () =>
+    fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+  let res: Response;
+  try {
+    res = await doFetch();
+  } catch {
+    await new Promise((r) => setTimeout(r, 900));
+    res = await doFetch();
+  }
+  let data: unknown = {};
+  try {
+    data = await res.json();
+  } catch {
+    /* empty body */
+  }
+  if (!res.ok && isTransientFailure(res.status)) {
+    await new Promise((r) => setTimeout(r, 900));
+    res = await doFetch();
+    try {
+      data = await res.json();
+    } catch {
+      /* keep {} */
+    }
+  }
   if (!res.ok) throw new Error((data as { error?: string }).error || `Request failed (${res.status})`);
   return data as T;
 }

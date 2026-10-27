@@ -246,7 +246,17 @@ export async function POST(req: NextRequest) {
               system,
               user,
               [{ mime, base64: crop.imageDataUrl.split(",")[1] || "" }],
-              { subject: subject.subject, direction: subject.direction, apiKey: byok },
+              {
+                subject: subject.subject,
+                direction: subject.direction,
+                apiKey: byok,
+                // hard-bounded so one hung/hallucinating model call cannot
+                // hold this request past the preview gateway's patience
+                // (which 502s the browser and fails the whole batch)
+                retries: 1,
+                timeoutMs: 40_000,
+                deadlineMs: 45_000,
+              },
             );
             const readings = Array.isArray(parsed.readings) ? parsed.readings : [];
             // index-first match with positional fallback (single band per
