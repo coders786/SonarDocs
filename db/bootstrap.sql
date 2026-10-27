@@ -32,6 +32,7 @@ CREATE TABLE "OcrPage" (
     "width" INTEGER,
     "height" INTEGER,
     "bands" TEXT,
+    "sandboxCrops" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "OcrPage_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "OcrSession" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
