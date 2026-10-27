@@ -46,6 +46,7 @@ export default function SonarApp() {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [engineOpen, setEngineOpen] = useState(false);
   const [cameraGuideOpen, setCameraGuideOpen] = useState(false);
+  const [serverGemini, setServerGemini] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (!articlesLoaded) {
@@ -55,6 +56,14 @@ export default function SonarApp() {
         .catch(() => setArticles([]));
     }
   }, [articlesLoaded, setArticles]);
+
+  // real engine state for the header dot (never hardcode "active")
+  useEffect(() => {
+    fetch("/api/engine")
+      .then((r) => r.json())
+      .then((d: { gemini?: boolean }) => setServerGemini(Boolean(d.gemini)))
+      .catch(() => setServerGemini(false));
+  }, [engineOpen]);
 
   // resume a session via /?session=<id>
   useEffect(() => {
@@ -165,7 +174,10 @@ export default function SonarApp() {
             >
               <Settings2 className="h-4 w-4" aria-hidden />
               <span className="hidden sm:inline">AI Engine</span>
-              <span className="h-2 w-2 rounded-full bg-emerald-500" aria-label="Engine active" />
+              <span
+                className={`h-2 w-2 rounded-full ${serverGemini === false ? "bg-stone-300" : "bg-emerald-500"}`}
+                aria-label={serverGemini === false ? "Engine on Z.ai fallback" : "Engine active"}
+              />
             </Button>
             <Button
               variant="outline"

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, KeyRound, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, KeyRound, Loader2, TriangleAlert, XCircle } from "lucide-react";
 import { useSonar } from "./store";
 import { api } from "./types";
 import { Button } from "@/components/ui/button";
@@ -24,18 +24,29 @@ import { Input } from "@/components/ui/input";
 export function EngineSettings({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const geminiKey = useSonar((s) => s.geminiKey);
   const setGeminiKey = useSonar((s) => s.setGeminiKey);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(geminiKey);
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [serverGemini, setServerGemini] = useState<boolean | null>(null);
 
-  const [prevOpen, setPrevOpen] = useState(open);
-  if (open !== prevOpen) {
-    setPrevOpen(open);
-    if (open) {
-      setDraft(geminiKey);
-      setResult(null);
-    }
-  }
+  // Fresh state per open: the dialog is conditionally mounted ({open && <EngineSettings/>}),
+  // so it remounts with draft = geminiKey every time it opens. No render-phase
+  // open/prevOpen diff is needed (and it would never fire under this mount pattern).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    fetch("/api/engine")
+      .then((r) => r.json())
+      .then((d: { gemini?: boolean }) => {
+        if (!cancelled) setServerGemini(Boolean(d.gemini));
+      })
+      .catch(() => {
+        if (!cancelled) setServerGemini(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, geminiKey]);
 
   async function test() {
     setTesting(true);
@@ -72,15 +83,29 @@ export function EngineSettings({ open, onOpenChange }: { open: boolean; onOpenCh
           </DialogDescription>
         </DialogHeader>
 
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-xs text-emerald-900">
-          <div className="flex items-center gap-2 font-semibold">
-            <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" aria-hidden />
-            <span>Server Gemini Engine is Active</span>
+        {serverGemini !== null && (
+          <div
+            className={`rounded-lg border p-3 text-xs ${
+              serverGemini
+                ? "border-emerald-200 bg-emerald-50/70 text-emerald-900"
+                : "border-amber-200 bg-amber-50/70 text-amber-900"
+            }`}
+          >
+            <div className="flex items-center gap-2 font-semibold">
+              {serverGemini ? (
+                <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" aria-hidden />
+              ) : (
+                <TriangleAlert className="h-4 w-4 text-amber-600 shrink-0" aria-hidden />
+              )}
+              <span>{serverGemini ? "Server Gemini Engine is Active" : "No server key — running on the Z.ai fallback"}</span>
+            </div>
+            <p className={`mt-1 text-[11px] ${serverGemini ? "text-emerald-800" : "text-amber-800"}`}>
+              {serverGemini
+                ? "Connected to Google AI Studio. You can test connectivity below or optionally provide a custom override key."
+                : "The pipeline still works — python crops each row and the Z.ai engine reads it. Add GEMINI_API_KEY on the server (or paste a key below) to activate the per-subject Gemini engines."}
+            </p>
           </div>
-          <p className="mt-1 text-[11px] text-emerald-800">
-            Connected to Google AI Studio. You can test connectivity below or optionally provide a custom override key.
-          </p>
-        </div>
+        )}
 
         <div className="space-y-1.5">
           <label className="text-xs font-medium text-stone-600" htmlFor="gemini-key-input">
