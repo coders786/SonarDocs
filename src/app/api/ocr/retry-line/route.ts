@@ -3,12 +3,12 @@ import { db, ensureDb } from "@/lib/db";
 import { cropBand } from "@/lib/imagetools";
 import { buildReadSystemPrompt, buildReadUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
-import { AiConfigError, visionJson } from "@/lib/zai";
+import { AiConfigError, visionJson, LONG_HOST } from "@/lib/zai";
 import { byokFromRequest } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 /**
  * POST /api/ocr/retry-line  { lineId }
@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
       system,
       user,
       [{ mime, base64: crop.imageDataUrl.split(",")[1] || "" }],
-      { subject: subject.subject, direction: subject.direction, apiKey: byok, retries: 1, timeoutMs: 40_000, deadlineMs: 45_000 },
+      { subject: subject.subject, direction: subject.direction, apiKey: byok, retries: 1, timeoutMs: LONG_HOST ? 100_000 : 40_000, deadlineMs: LONG_HOST ? 110_000 : 45_000 },
     );
     const r = parsed.readings?.[0] || {};
 

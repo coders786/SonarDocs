@@ -20,6 +20,15 @@ export { engineForSubject, geminiEnabled } from "@/lib/gemini";
 export type EngineHints = { subject?: string; direction?: "rtl" | "ltr"; apiKey?: string };
 
 /**
+ * True on Vercel serverless: there is NO preview gateway in front (the
+ * sandbox preview's gateway 502s the browser after ~1min — that's why the
+ * tight per-route budgets exist) and functions may run up to 300s, so model
+ * budgets can breathe. Keep both worlds from one codebase: routes scale
+ * their deadline/attempt constants off this flag.
+ */
+export const LONG_HOST = !!process.env.VERCEL;
+
+/**
  * Race a model promise against a hard deadline.
  *
  * WHY THIS EXISTS: every HTTP request from the browser passes through the

@@ -1,22 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
 import sharp from "sharp";
 import { db, ensureDb } from "@/lib/db";
-import { AiConfigError, extractJson, visionChat, visionJson } from "@/lib/zai";
+import { AiConfigError, extractJson, visionChat, visionJson, LONG_HOST } from "@/lib/zai";
 import { byokFromRequest, engineForSubject, geminiEnabled, sandboxAnalyzePage } from "@/lib/gemini";
 import { buildLayoutSystemPrompt, buildLayoutUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 /**
  * Budgets so this request ALWAYS answers inside the preview gateway's
  * patience (the gateway 502s the browser when a request runs too long —
- * the "layout took 2.3 minutes → Request failed (502)" bug).
+ * the "layout took 2.3 minutes → Request failed (502)" bug). On Vercel
+ * there is no gateway and functions run up to 300s, so budgets breathe:
+ * the code-execution sandbox legitimately needs 60-120s to upload the
+ * page, write and run its OpenCV code.
  */
-const LAYOUT_DEADLINE_MS = 50_000; // whole model phase must finish inside this
-const LAYOUT_ATTEMPT_MS = 35_000; // one model call at most this long
+const LAYOUT_DEADLINE_MS = LONG_HOST ? 210_000 : 50_000; // whole model phase must finish inside this
+const LAYOUT_ATTEMPT_MS = LONG_HOST ? 100_000 : 35_000; // one model call at most this long
+const SANDBOX_TIMEOUT_MS = LONG_HOST ? 160_000 : 45_000; // gemini code-execution page analysis
 
 /**
  * Layout only needs band GEOMETRY + semantics — not fine glyph detail.
@@ -297,10 +301,11 @@ export async function POST(req: NextRequest) {
             pageMime: mime,
             engine,
             apiKey: byok,
-            // the sandbox writes + runs code, which takes real time — but it
-            // must NOT eat the whole gateway budget, otherwise the fallback
-            // below never gets to answer and the browser gets a 502
-            timeoutMs: 45_000,
+            // the sandbox writes + runs code, which takes real time — on the
+            // sandbox preview it must NOT eat the whole gateway budget
+            // (otherwise the fallback below never gets to answer and the
+            // browser gets a 502); on Vercel it gets the room it needs
+            timeoutMs: SANDBOX_TIMEOUT_MS,
           });
           const pageW = page.width || 1600;
           const pageH = page.height || 1200;

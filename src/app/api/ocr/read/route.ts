@@ -3,12 +3,12 @@ import { db, ensureDb } from "@/lib/db";
 import { cropBand, sandboxCropVariant } from "@/lib/imagetools";
 import { buildReadSystemPrompt, buildReadUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
-import { AiConfigError, visionJson } from "@/lib/zai";
+import { AiConfigError, visionJson, LONG_HOST } from "@/lib/zai";
 import { byokFromRequest } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 type Reading = {
   index: number;
@@ -254,8 +254,8 @@ export async function POST(req: NextRequest) {
                 // hold this request past the preview gateway's patience
                 // (which 502s the browser and fails the whole batch)
                 retries: 1,
-                timeoutMs: 40_000,
-                deadlineMs: 45_000,
+                timeoutMs: LONG_HOST ? 100_000 : 40_000,
+                deadlineMs: LONG_HOST ? 110_000 : 45_000,
               },
             );
             const readings = Array.isArray(parsed.readings) ? parsed.readings : [];

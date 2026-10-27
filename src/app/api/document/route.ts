@@ -8,12 +8,12 @@ import {
 } from "@/lib/doc-prompts";
 import type { SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
-import { AiConfigError, extractJson, textJson } from "@/lib/zai";
+import { AiConfigError, extractJson, textJson, LONG_HOST } from "@/lib/zai";
 import { byokFromRequest } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const BLOCK_TYPES = new Set(["title", "subtitle", "heading", "paragraph", "list-item", "math", "quote", "note", "divider"]);
 
@@ -116,8 +116,8 @@ export async function POST(req: NextRequest) {
         // app — bound it so the browser never gets a gateway 502; on timeout
         // the catch below degrades to a plain transcript document
         retries: 1,
-        timeoutMs: 50_000,
-        deadlineMs: 55_000,
+        timeoutMs: LONG_HOST ? 120_000 : 50_000,
+        deadlineMs: LONG_HOST ? 130_000 : 55_000,
       });
       if (!title && parsed.title) title = String(parsed.title).trim();
       blocks = normalizeBlocks(parsed.blocks);
