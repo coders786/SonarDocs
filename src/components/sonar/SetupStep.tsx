@@ -60,22 +60,32 @@ export const fmtDate = (iso: string) => FMT_DATE.format(new Date(iso));
  * engines are active client-side even if the server has no env key.
  */
 function engineChip(a: SubjectSummary, info: EngineInfo | null, byokKey: string): { text: string; active: boolean } | null {
+  // mirrors engineForSubject(): code execution is a hard-RTL-script feature
+  // (Sindhi + custom RTL); Urdu/English/Math run plain high thinking
+  const isHard = a.subject === "sindhi" || (!!a.custom && a.direction === "rtl");
+  const conf = info?.subjects.find((s) => s.subject === a.subject);
+  const fallbackLabel = isHard
+    ? "Gemini 3.5 Flash · medium thinking · code execution"
+    : "Gemini 3.5 Flash Lite · high thinking";
+  const label = conf?.label || fallbackLabel;
+  const codeExec = /code execution/i.test(label);
+  const parts = label.split("·").map((p) => p.trim());
+  const model = (parts[0] || "").replace(/^Gemini /i, "");
+  const thinking = (parts[1] || "").replace(" thinking", "");
+
   if (byokKey) {
-    const conf = info?.subjects.find((s) => s.subject === a.subject);
-    const [model, thinking] = (conf ? conf.label : a.direction === "rtl" ? "Gemini 3.5 Flash · medium thinking · code execution" : "Gemini 3.5 Flash Lite · high thinking").split("·").map((p) => p.trim());
-    return { text: `Gemini (your key) · ${model.replace(/^Gemini /i, "")} · ${(thinking || "").replace(" thinking", "")} · code exec`, active: true };
+    return {
+      text: `Gemini (your key) · ${model} · ${thinking}${codeExec ? " · code exec" : ""}`,
+      active: true,
+    };
   }
   if (!info) return null;
   if (!info.gemini) return { text: "Z.ai fallback · add GEMINI_API_KEY", active: false };
-  const conf = info.subjects.find((s) => s.subject === a.subject);
   if (conf) {
-    const [model, thinking] = conf.label.split("·").map((p) => p.trim());
-    return { text: `${model} · ${(thinking || "").replace(" thinking", "")} · code exec`, active: true };
+    return { text: `${model} · ${thinking}${codeExec ? " · code exec" : ""}`, active: true };
   }
-  // custom subject — same rule as engineForSubject(): custom RTL = hard engine
-  return a.direction === "rtl"
-    ? { text: "Gemini 3.5 Flash · medium · code exec", active: true }
-    : { text: "Gemini 3.5 Flash Lite · high · code exec", active: true };
+  // custom subject without an API label — use the same fallback
+  return { text: `${model} · ${thinking}${codeExec ? " · code exec" : ""}`, active: true };
 }
 
 export default function SetupStep() {
