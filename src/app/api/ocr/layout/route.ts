@@ -402,6 +402,10 @@ export async function POST(req: NextRequest) {
         retries: 1,
         timeoutMs: LAYOUT_ATTEMPT_MS,
         deadlineMs: LAYOUT_DEADLINE_MS,
+        // layout only labels bands — geometry comes from python/sharp. Code
+        // execution is NOT needed and attaching it makes the call 5-10×
+        // slower (the model starts writing+running code).
+        engineOverride: { codeExecution: false },
       });
       rawBands = parsed.bands;
     } catch (err) {

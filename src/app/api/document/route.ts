@@ -145,6 +145,8 @@ export async function POST(req: NextRequest) {
         retries: 1,
         timeoutMs: LONG_HOST ? 120_000 : 50_000,
         deadlineMs: LONG_HOST ? 130_000 : 55_000,
+        // document writing is plain prose generation — no code execution
+        engineOverride: { codeExecution: false },
       });
       if (!title && parsed.title) title = String(parsed.title).trim();
       const parsedBlocks = normalizeBlocks(parsed.blocks);

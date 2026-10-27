@@ -1,5 +1,5 @@
 import ZAI from "z-ai-web-dev-sdk";
-import { engineForSubject, geminiEnabled, geminiGenerate } from "@/lib/gemini";
+import { engineForSubject, geminiEnabled, geminiGenerate, type EngineConfig } from "@/lib/gemini";
 
 /** Re-exported so routes/UI can describe the active engine without importing the module twice. */
 export { engineForSubject, geminiEnabled } from "@/lib/gemini";
@@ -17,7 +17,17 @@ export { engineForSubject, geminiEnabled } from "@/lib/gemini";
  */
 
 /** Per-call engine hints threaded from the routes (which know the session subject + BYOK key). */
-export type EngineHints = { subject?: string; direction?: "rtl" | "ltr"; apiKey?: string };
+export type EngineHints = {
+  subject?: string;
+  direction?: "rtl" | "ltr";
+  apiKey?: string;
+  /** tweak the per-subject engine for this call — e.g. layout and document
+   *  calls pass { codeExecution: false }: code execution is for the sandbox
+   *  analysis and hard handwriting reads, and attaching it to plain
+   *  band-labeling / document-writing calls makes them far slower (the
+   *  model starts writing+running code it doesn't need). */
+  engineOverride?: Partial<EngineConfig>;
+};
 
 /**
  * True on Vercel serverless: there is NO preview gateway in front (the
@@ -113,8 +123,9 @@ export async function visionChat(
   opts: { thinking?: boolean; timeoutMs?: number } & EngineHints = {},
 ): Promise<string> {
   if (geminiEnabled(opts.apiKey)) {
+    let geminiErr: unknown = null;
     try {
-      const engine = engineForSubject(opts.subject || "", opts.direction || "ltr");
+      const engine: EngineConfig = { ...engineForSubject(opts.subject || "", opts.direction || "ltr"), ...(opts.engineOverride || {}) };
       const res = await raceWithTimeout(
         geminiGenerate({ system, user, images, engine, apiKey: opts.apiKey, timeoutMs: opts.timeoutMs }),
         opts.timeoutMs ?? 120_000,
@@ -122,7 +133,18 @@ export async function visionChat(
       );
       return res.text;
     } catch (err) {
+      geminiErr = err;
       console.warn("[ai] Gemini vision call failed — falling back to Z.ai:", err instanceof Error ? err.message : err);
+    }
+    try {
+      await getZai();
+    } catch (zaiErr) {
+      // No fallback configured — the GEMINI error is the real cause; report
+      // it instead of the misleading "AI client is not configured".
+      if (geminiErr instanceof Error) {
+        throw new Error(`Gemini vision call failed and no Z.ai fallback is configured on this host: ${geminiErr.message}`);
+      }
+      throw zaiErr;
     }
   }
   const zai = await getZai();
@@ -154,8 +176,9 @@ export async function textChat(
   opts: EngineHints & { timeoutMs?: number } = {},
 ): Promise<string> {
   if (geminiEnabled(opts.apiKey)) {
+    let geminiErr: unknown = null;
     try {
-      const engine = engineForSubject(opts.subject || "", opts.direction || "ltr");
+      const engine: EngineConfig = { ...engineForSubject(opts.subject || "", opts.direction || "ltr"), ...(opts.engineOverride || {}) };
       const res = await raceWithTimeout(
         geminiGenerate({ system, user, engine, apiKey: opts.apiKey, timeoutMs: opts.timeoutMs }),
         opts.timeoutMs ?? 120_000,
@@ -163,7 +186,16 @@ export async function textChat(
       );
       return res.text;
     } catch (err) {
+      geminiErr = err;
       console.warn("[ai] Gemini text call failed — falling back to Z.ai:", err instanceof Error ? err.message : err);
+    }
+    try {
+      await getZai();
+    } catch (zaiErr) {
+      if (geminiErr instanceof Error) {
+        throw new Error(`Gemini text call failed and no Z.ai fallback is configured on this host: ${geminiErr.message}`);
+      }
+      throw zaiErr;
     }
   }
   const zai = await getZai();
@@ -315,7 +347,7 @@ export async function visionJson<T>(
           ? user
           : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object, double-checking that every key and value is properly quoted and separated.`,
         images,
-        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey, timeoutMs: attemptTimeout },
+        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey, timeoutMs: attemptTimeout, engineOverride: opts.engineOverride },
       );
     } catch (err) {
       lastError = err;
@@ -354,7 +386,7 @@ export async function textJson<T>(system: string, user: string, opts: JsonCallOp
         attempt === 0
           ? user
           : `${user}\n\nIMPORTANT: your previous reply was not parseable (${lastError instanceof Error ? lastError.message.slice(0, 160) : "invalid JSON"}). Respond again with ONLY the valid JSON object.`,
-        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey, timeoutMs: attemptTimeout },
+        { subject: opts.subject, direction: opts.direction, apiKey: opts.apiKey, timeoutMs: attemptTimeout, engineOverride: opts.engineOverride },
       );
     } catch (err) {
       lastError = err;
