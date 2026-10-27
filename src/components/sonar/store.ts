@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import type { BandDecision, DocBlock, OcrLine, PageState, SessionState, SonarDocument, SubjectSummary } from "./types";
-import { initGeminiKey, setGeminiKey as persistGeminiKey } from "./types";
+import { setGeminiKey as persistGeminiKey } from "./types";
 
 export type Step = "setup" | "processing" | "verify" | "document";
 
@@ -156,7 +156,11 @@ export const useSonar = create<SonarState>((set) => ({
   document: null,
   generating: false,
   exporting: false,
-  geminiKey: initGeminiKey(),
+  // BYOK key is hydrated AFTER mount (see SetupStep's init effect) — it must
+  // stay "" during SSR and the first client render, otherwise the engine
+  // chips render differently on server vs client and React throws a
+  // hydration mismatch (localStorage must never be read during render).
+  geminiKey: "",
 
   setStep: (step) => set({ step }),
   setArticles: (articles) => set({ articles, articlesLoaded: true }),

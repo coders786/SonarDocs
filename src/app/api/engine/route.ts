@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { engineForSubject, geminiEnabled } from "@/lib/gemini";
+import { engineForSubject, geminiEnabled, geminiKeyPool } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,8 +9,9 @@ export const dynamic = "force-dynamic";
  *
  * Describes the AI engine assignment per subject so the UI can show which
  * model + thinking level + tools each subject runs on. `gemini` is true when
- * GEMINI_API_KEY is configured; otherwise every call falls back to the Z.ai
- * SDK (the per-subject config still describes what Gemini WOULD be used).
+ * a key is configured (BYOK, GEMINI_API_KEYS pool or GEMINI_API_KEY);
+ * otherwise every call falls back to the Z.ai SDK. `poolSize` is how many
+ * server keys requests roll through (round-robin + 429 failover).
  */
 export async function GET() {
   const subjects = ["sindhi", "urdu", "english", "mathematics"].map((s) => {
@@ -25,6 +26,7 @@ export async function GET() {
   });
   return NextResponse.json({
     gemini: geminiEnabled(),
+    poolSize: geminiKeyPool().length,
     fallback: "Z.ai SDK (set GEMINI_API_KEY to activate the Gemini engines)",
     subjects,
   });

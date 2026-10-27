@@ -12,7 +12,10 @@ import type { VisionImage } from "@/lib/zai";
  * Key resolution (BYOK — bring your own key):
  *   1. the per-request key sent by the browser (`x-gemini-key` header) — the
  *      user's own key, stored client-side only;
- *   2. the server's GEMINI_API_KEY / GOOGLE_API_KEY env var;
+ *   2. the server's key pool: GEMINI_API_KEYS (comma/semicolon/newline
+ *      separated, ROLLED round-robin per request, with automatic failover to
+ *      the next key on 429 quota / 401 / 403), falling back to the single
+ *      GEMINI_API_KEY / GOOGLE_API_KEY env var;
  *   3. no key → every call transparently falls back to the Z.ai SDK path
  *      (see src/lib/zai.ts), so the app always works.
  *
@@ -105,6 +108,43 @@ function readKeyFromFile(): string {
   return "";
 }
 
+/**
+ * The server's Gemini key pool.
+ *
+ * GEMINI_API_KEYS holds one or more keys (new AI Studio "AQ.*" keys and
+ * classic "AIza…" keys both work as-is) separated by comma / semicolon /
+ * newline. Requests ROLL through the pool round-robin — spreading quota and
+ * absorbing per-key 429s — and a key that answers 429/401/403 is skipped for
+ * the following calls. Falls back to the single GEMINI_API_KEY env var.
+ */
+export function geminiKeyPool(): string[] {
+  const raw = process.env.GEMINI_API_KEYS || "";
+  const keys = raw
+    .split(/[,;\n]/)
+    .map((k) => k.trim())
+    .filter((k) => k.length > 20 && !k.startsWith("MY_"));
+  if (keys.length) return keys;
+  const single = envGeminiKey();
+  return single ? [single] : [];
+}
+
+let poolCursor = 0;
+
+/**
+ * Pick the key for one Gemini operation: BYOK wins; otherwise take the next
+ * key in the rotation (advancing the cursor so concurrent requests spread
+ * across the pool).
+ */
+export function pickGeminiKey(byokKey?: string): string {
+  const byok = sanitizeByokKey(byokKey);
+  if (byok) return byok;
+  const pool = geminiKeyPool();
+  if (!pool.length) return "";
+  const key = pool[poolCursor % pool.length];
+  poolCursor++;
+  return key;
+}
+
 export function envGeminiKey(): string {
   const envVal = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
   if (envVal && !envVal.startsWith("MY_") && envVal.length > 20) {
@@ -118,9 +158,9 @@ export function envGeminiKey(): string {
   return envVal;
 }
 
-/** True when a Gemini key is available (BYOK or env) — engine active. */
+/** True when a Gemini key is available (BYOK or any pool key) — engine active. */
 export function geminiEnabled(byokKey?: string): boolean {
-  return (sanitizeByokKey(byokKey) || envGeminiKey()).length > 0;
+  return (sanitizeByokKey(byokKey) || geminiKeyPool()[0] || "").length > 0;
 }
 
 const GEMINI_BASE = process.env.GEMINI_BASE_URL || "https://generativelanguage.googleapis.com/v1beta";
@@ -154,8 +194,11 @@ export async function geminiGenerate(opts: {
   /** extra parts (e.g. fileData references to uploaded files) appended after the user text */
   extraParts?: Array<Record<string, unknown>>;
 }): Promise<GeminiResult> {
-  const key = sanitizeByokKey(opts.apiKey) || envGeminiKey();
-  if (!key) throw new Error("GEMINI_API_KEY is not configured (no BYOK key and no env key)");
+  // BYOK pins one key; otherwise roll through the pool with failover on
+  // quota/auth failures (429 RESOURCE_EXHAUSTED, 401, 403).
+  const pinned = sanitizeByokKey(opts.apiKey);
+  const pool = pinned ? [pinned] : geminiKeyPool();
+  if (!pool.length) throw new Error("GEMINI_API_KEY is not configured (no BYOK key and no env key)");
 
   const parts: Array<Record<string, unknown>> = [{ text: opts.user }];
   for (const img of opts.images || []) {
@@ -177,52 +220,73 @@ export async function geminiGenerate(opts: {
     body.tools = [{ codeExecution: {} }];
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 120_000);
-  try {
-    const res = await fetch(`${GEMINI_BASE}/models/${encodeURIComponent(opts.engine.model)}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+  let lastError: Error = new Error("Gemini call did not run");
+  for (let attempt = 0; attempt < pool.length; attempt++) {
+    // start each attempt at the rotation cursor so concurrent requests spread
+    const key = pool[(poolCursor + attempt) % pool.length];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 120_000);
+    try {
+      const res = await fetch(`${GEMINI_BASE}/models/${encodeURIComponent(opts.engine.model)}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      if (res.status === 404) {
-        throw new Error(
-          `Gemini model "${opts.engine.model}" not found (404). Check GEMINI_MODEL_HARD / GEMINI_MODEL_DEFAULT. ${errText.slice(0, 200)}`,
-        );
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        if (res.status === 404) {
+          throw new Error(
+            `Gemini model "${opts.engine.model}" not found (404). Check GEMINI_MODEL_HARD / GEMINI_MODEL_DEFAULT. ${errText.slice(0, 200)}`,
+          );
+        }
+        const err = new Error(`Gemini API ${res.status}: ${errText.slice(0, 300)}`);
+        if ((res.status === 429 || res.status === 401 || res.status === 403) && attempt < pool.length - 1) {
+          console.warn(`[gemini] key #${(poolCursor + attempt) % pool.length + 1} rejected (${res.status}) — rolling to the next key`);
+          lastError = err;
+          continue; // fail over to the next key in the pool
+        }
+        throw err;
       }
-      throw new Error(`Gemini API ${res.status}: ${errText.slice(0, 300)}`);
-    }
 
-    const data = (await res.json()) as {
-      candidates?: Array<{ content?: { parts?: GeminiPart[] } }>;
-      promptFeedback?: { blockReason?: string };
-    };
-    const partsOut = data.candidates?.[0]?.content?.parts || [];
-    const text = partsOut
-      .map((p) => (typeof p.text === "string" ? p.text : ""))
-      .join("")
-      .trim();
-    const images: VisionImage[] = [];
-    for (const p of partsOut) {
-      if (p.inlineData?.data) {
-        images.push({
-          mime: p.inlineData.mimeType || "image/png",
-          base64: p.inlineData.data,
-        });
+      poolCursor = (poolCursor + attempt + 1) % Math.max(1, pool.length);
+      const data = (await res.json()) as {
+        candidates?: Array<{ content?: { parts?: GeminiPart[] } }>;
+        promptFeedback?: { blockReason?: string };
+      };
+      const partsOut = data.candidates?.[0]?.content?.parts || [];
+      const text = partsOut
+        .map((p) => (typeof p.text === "string" ? p.text : ""))
+        .join("")
+        .trim();
+      const images: VisionImage[] = [];
+      for (const p of partsOut) {
+        if (p.inlineData?.data) {
+          images.push({
+            mime: p.inlineData.mimeType || "image/png",
+            base64: p.inlineData.data,
+          });
+        }
       }
+      if (!text && images.length === 0) {
+        const blocked = data.promptFeedback?.blockReason ? ` (blocked: ${data.promptFeedback.blockReason})` : "";
+        throw new Error(`Gemini returned no content${blocked}`);
+      }
+      return { text, images, model: opts.engine.model };
+    } catch (err) {
+      // 429/401/403 with remaining pool → try the next key; everything else throws
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/Gemini API (429|401|403):/.test(msg) && attempt < pool.length - 1) {
+        lastError = err instanceof Error ? err : new Error(msg);
+        continue;
+      }
+      throw err instanceof Error ? err : new Error(msg);
+    } finally {
+      clearTimeout(timer);
     }
-    if (!text && images.length === 0) {
-      const blocked = data.promptFeedback?.blockReason ? ` (blocked: ${data.promptFeedback.blockReason})` : "";
-      throw new Error(`Gemini returned no content${blocked}`);
-    }
-    return { text, images, model: opts.engine.model };
-  } finally {
-    clearTimeout(timer);
   }
+  throw lastError;
 }
 
 /* ------------------------------------------------------------------ */
@@ -325,17 +389,21 @@ export async function sandboxAnalyzePage(opts: {
   apiKey?: string;
   timeoutMs?: number;
 }): Promise<SandboxAnalysis> {
+  // ONE key must own both the file upload and the generateContent call (a
+  // file uploaded under key A is not visible to key B), so pin the rotation
+  // cursor once per sandbox run.
+  const pinned = pickGeminiKey(opts.apiKey);
   const file = await uploadToGemini({
     dataBase64: opts.pageBase64,
     mime: opts.pageMime,
-    apiKey: opts.apiKey,
+    apiKey: pinned,
     displayName: "sonar-page",
   });
   const res = await geminiGenerate({
     system: opts.system,
     user: opts.user,
     engine: opts.engine,
-    apiKey: opts.apiKey,
+    apiKey: pinned,
     timeoutMs: opts.timeoutMs ?? 180_000,
     extraParts: [{ fileData: { fileUri: file.uri, mimeType: opts.pageMime } }],
   });

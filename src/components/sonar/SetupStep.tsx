@@ -18,7 +18,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useSonar } from "./store";
-import { api, fileToDownscaledDataUrl, type SubjectSummary } from "./types";
+import { api, fileToDownscaledDataUrl, initGeminiKey, type SubjectSummary } from "./types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { CameraGuideDialog } from "./CameraGuideDialog";
@@ -41,6 +41,18 @@ function SubjectIcon({ icon, className }: { icon: string; className?: string }) 
 
 type EngineSubjectConf = { subject: string; model: string; thinkingLevel: string; codeExecution: boolean; label: string };
 type EngineInfo = { gemini: boolean; subjects: EngineSubjectConf[] };
+
+/**
+ * Deterministic formatters — `toLocaleString()`/`toLocaleDateString()` use
+ * the runtime's locale, which differs between the Node server and the user's
+ * browser (React hydration bullet #4: "Date formatting in a user's locale
+ * which doesn't match the server"). Fixed-locale + fixed-timezone Intl
+ * formatters render byte-identical strings on both sides.
+ */
+const FMT_INT = new Intl.NumberFormat("en-US");
+const FMT_DATE = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+export const fmtInt = (n: number) => FMT_INT.format(n);
+export const fmtDate = (iso: string) => FMT_DATE.format(new Date(iso));
 
 /**
  * Compact chip text for a subject's engine assignment (mirrors server rule
@@ -114,6 +126,13 @@ export default function SetupStep() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    // BYOK key lives in localStorage — load it strictly AFTER hydration.
+    // Reading it during render/store-creation made the engine chips differ
+    // between server HTML and first client render (hydration mismatch).
+    const stored = initGeminiKey();
+    if (stored && stored !== useSonar.getState().geminiKey) {
+      useSonar.setState({ geminiKey: stored });
+    }
     api
       .listSessions()
       .then((r) => setRecent(r.sessions.slice(0, 4)))
@@ -254,7 +273,7 @@ export default function SetupStep() {
 })()}
                 <div className="mt-3 flex items-center justify-between">
                   <span className="text-[11px] font-medium text-amber-800">
-                    {a.wordCount.toLocaleString()} words of research
+                    {fmtInt(a.wordCount)} words of research
                   </span>
                   <Badge variant="outline" className="border-stone-200 text-[10px] text-stone-500">
                     {a.direction === "rtl" ? "RTL" : "LTR"}
@@ -465,7 +484,7 @@ export default function SetupStep() {
                 <FileText className="h-3.5 w-3.5" aria-hidden />
                 {s.subject} · {s.pages.length} page{s.pages.length === 1 ? "" : "s"} · {s.status}
                 <span className="text-stone-400">
-                  {new Date(s.updatedAt).toLocaleDateString()}
+                  {fmtDate(s.updatedAt)}
                 </span>
               </button>
             ))}
@@ -492,7 +511,7 @@ export default function SetupStep() {
       {selected && (
         <p className="text-center text-xs text-stone-400">
           <Trash2 className="mr-1 inline h-3 w-3" aria-hidden />
-          Dossier ready: “{selected.title}” — {selected.wordCount.toLocaleString()} words, v{selected.version}. It
+          Dossier ready: “{selected.title}” — {fmtInt(selected.wordCount)} words, v{selected.version}. It
           will be injected into the OCR system prompt.
         </p>
       )}
