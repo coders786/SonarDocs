@@ -21,7 +21,7 @@ export const maxDuration = 300;
  */
 const LAYOUT_DEADLINE_MS = LONG_HOST ? 210_000 : 50_000; // whole model phase must finish inside this
 const LAYOUT_ATTEMPT_MS = LONG_HOST ? 100_000 : 35_000; // one model call at most this long
-const SANDBOX_TIMEOUT_MS = LONG_HOST ? 160_000 : 45_000; // gemini code-execution page analysis
+const SANDBOX_TIMEOUT_MS = LONG_HOST ? 80_000 : 45_000; // gemini code-execution page analysis
 
 /**
  * Layout only needs band GEOMETRY + semantics — not fine glyph detail.
