@@ -24,7 +24,14 @@ export async function POST(req: NextRequest) {
     }
 
     const page = await db.ocrPage.findUnique({ where: { id: pageId } });
-    if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
+    if (!page) {
+      // serverless multi-instance: the verification status lives on another
+      // lambda instance's ephemeral DB. The client already holds the verified
+      // lines (its store is the source of truth for the document step), so
+      // this write is best-effort — acknowledge and move on instead of
+      // dead-ending the wizard.
+      return NextResponse.json({ ok: true, updated: 0, pageStatus: "verified", sessionStatus: "active", note: "ephemeral instance — verification kept client-side" });
+    }
 
     const validStatus = new Set(["approved", "corrected", "flagged"]);
     let updated = 0;

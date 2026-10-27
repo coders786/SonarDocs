@@ -70,28 +70,55 @@ export async function POST(req: NextRequest) {
       where: { id: sessionId },
       include: { pages: { orderBy: { index: "asc" }, include: { lines: { orderBy: { order: "asc" } } } } },
     });
-    if (!session) return NextResponse.json({ error: "Session not found" }, { status: 404 });
 
-    const allLines = session.pages.flatMap((p) =>
-      p.lines
-        .filter((l) => l.kind !== "ignore" && (l.verifiedText ?? l.text).trim().length > 0)
-        .map((l) => ({
-          pageIndex: p.index,
-          order: l.order,
-          kind: l.kind,
-          text: (l.verifiedText ?? l.text).trim(),
-          latex: l.latex,
-          status: l.status,
-        })),
-    );
+    // Serverless multi-instance: this lambda may have never seen the session
+    // (its /tmp SQLite is per-instance). The client holds every verified
+    // line in its store — when provided, use them directly and (re)create
+    // the session row so the DocumentProject FK stays valid.
+    const ctxSubject = typeof body.context?.subject === "string" ? body.context.subject : "";
+    const ctxLines: Array<{ pageIndex: number; order: number; kind: string; text: string; latex?: string | null; status?: string }> =
+      Array.isArray(body.context?.lines) ? body.context.lines : [];
+    if (!session) {
+      if (!ctxSubject || ctxLines.length === 0) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+      try {
+        await db.ocrSession.create({ data: { id: sessionId, subject: ctxSubject, status: "verified" } });
+      } catch {
+        /* lost a create race — the row exists now */
+      }
+    }
+
+    const subjectSlug = session?.subject ?? ctxSubject;
+    const allLines = session
+      ? session.pages.flatMap((p) =>
+          p.lines
+            .filter((l) => l.kind !== "ignore" && (l.verifiedText ?? l.text).trim().length > 0)
+            .map((l) => ({
+              pageIndex: p.index,
+              order: l.order,
+              kind: l.kind,
+              text: (l.verifiedText ?? l.text).trim(),
+              latex: l.latex,
+              status: l.status,
+            })),
+        )
+      : ctxLines.map((l) => ({
+          pageIndex: Number(l.pageIndex) || 0,
+          order: Number(l.order) || 0,
+          kind: String(l.kind || "text"),
+          text: String(l.text || "").trim(),
+          latex: l.latex ?? null,
+          status: String(l.status || "approved"),
+        })).filter((l) => l.kind !== "ignore" && l.text.length > 0);
     if (allLines.length === 0) {
       return NextResponse.json({ error: "No verified transcription lines to build a document from." }, { status: 400 });
     }
 
-    const article = await getArticle(session.subject);
+    const article = await getArticle(subjectSlug);
     const subject: SubjectInfo = {
-      subject: session.subject,
-      language: article?.language ?? session.subject,
+      subject: subjectSlug,
+      language: article?.language ?? subjectSlug,
       nativeLabel: article?.nativeLabel ?? "",
       direction: article?.direction ?? "ltr",
     };
@@ -120,7 +147,13 @@ export async function POST(req: NextRequest) {
         deadlineMs: LONG_HOST ? 130_000 : 55_000,
       });
       if (!title && parsed.title) title = String(parsed.title).trim();
-      blocks = normalizeBlocks(parsed.blocks);
+      const parsedBlocks = normalizeBlocks(parsed.blocks);
+      if (parsedBlocks.length === 0) {
+        // model "succeeded" with zero blocks (degenerate 1-line inputs) —
+        // treat like a failure so the transcript fallback below runs
+        throw new Error("model returned no blocks");
+      }
+      blocks = parsedBlocks;
     } catch (err) {
       if (err instanceof AiConfigError) throw err;
       console.error("[api/document] model failed:", err);
@@ -161,7 +194,7 @@ export async function POST(req: NextRequest) {
         sessionId,
         title,
         docType,
-        subject: session.subject,
+        subject: subjectSlug,
         blocks: JSON.stringify(blocks),
       },
     });
@@ -181,9 +214,36 @@ export async function PUT(req: NextRequest) {
     const id = String(body.id || "");
     if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
     const doc = await db.documentProject.findUnique({ where: { id } });
-    if (!doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
-
     const blocks = normalizeBlocks(body.blocks);
+    if (!doc) {
+      // serverless: the row lives on another instance — re-create it here
+      // (upsert semantics with the client's stable id) so later exports on
+      // THIS instance find it. Client supplies the extra fields needed.
+      const sid = String(body.sessionId || "");
+      if (sid) {
+        try {
+          await db.ocrSession.create({ data: { id: sid, subject: String(body.subject || "english"), status: "verified" } });
+        } catch {
+          /* row exists (or race lost) — fine either way */
+        }
+      }
+      const created = await db.documentProject.upsert({
+        where: { id },
+        create: {
+          id,
+          sessionId: sid || "local",
+          title: String(body.title || "Untitled Document"),
+          docType: ("formatted-notes" as DocType),
+          subject: String(body.subject || "english"),
+          blocks: JSON.stringify(blocks),
+        },
+        update: { title: String(body.title || "Untitled Document"), blocks: JSON.stringify(blocks) },
+      });
+      return NextResponse.json({
+        document: { id: created.id, title: created.title, docType: created.docType, subject: created.subject, blocks },
+      });
+    }
+
     const title = String(body.title ?? doc.title).trim() || doc.title;
     const updated = await db.documentProject.update({
       where: { id },

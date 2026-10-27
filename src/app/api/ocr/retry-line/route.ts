@@ -5,16 +5,22 @@ import { buildReadSystemPrompt, buildReadUserPrompt, type SubjectInfo } from "@/
 import { getArticle } from "@/lib/subjects";
 import { AiConfigError, visionJson, LONG_HOST } from "@/lib/zai";
 import { byokFromRequest } from "@/lib/gemini";
+import { findPageOrRebuild, type PipelineContext } from "@/lib/pipeline-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 /**
- * POST /api/ocr/retry-line  { lineId }
+ * POST /api/ocr/retry-line  { lineId, context? }
  *
  * Re-reads a single band with a deeper zoom (scale 5, wider padding) and a
  * fresh model pass. The previous reading is kept as an alternative.
+ *
+ * Serverless: when the line/page rows live on another lambda instance's
+ * /tmp SQLite, the client's context (pageId + band order + current text +
+ * the layout bands) rebuilds them — the TranscriptionLine row is re-created
+ * with the client's stable lineId so the retry stays idempotent.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -23,8 +29,39 @@ export async function POST(req: NextRequest) {
     const lineId = String(body.lineId || "");
     if (!lineId) return NextResponse.json({ error: "lineId is required" }, { status: 400 });
 
-    const line = await db.transcriptionLine.findUnique({ where: { id: lineId }, include: { page: { include: { session: true } } } });
-    if (!line) return NextResponse.json({ error: "Line not found" }, { status: 404 });
+    let line = await db.transcriptionLine.findUnique({ where: { id: lineId }, include: { page: { include: { session: true } } } });
+
+    // ---- serverless rebuild path: this instance never saw this page ----
+    if (!line) {
+      const ctx = (body.context || null) as PipelineContext | null;
+      const page = await findPageOrRebuild(ctx);
+      if (!page) return NextResponse.json({ error: "Line not found" }, { status: 404 });
+      // order/kind/text travel as TOP-LEVEL request fields (see the client's
+      // ocrRetryLine payload) — not inside the context object
+      const order = Number(body.order);
+      if (!Number.isFinite(order)) return NextResponse.json({ error: "order is required to rebuild" }, { status: 400 });
+
+      const decisions: Array<{ index: number; box: { x: number; y: number; w: number; h: number } }> =
+        page.bands ? (JSON.parse(page.bands).decisions || []) : [];
+      const band = decisions.find((d) => d.index === order);
+      if (!band) return NextResponse.json({ error: "Band box missing — run layout again." }, { status: 400 });
+
+      // re-create the line row with the client's stable id (idempotent)
+      line = await db.transcriptionLine.upsert({
+        where: { id: lineId },
+        create: {
+          id: lineId,
+          pageId: page.id,
+          order,
+          kind: String(body.kind || "text"),
+          text: String(body.text || ""),
+          bbox: JSON.stringify(band.box),
+          confidence: "medium",
+        },
+        update: {},
+        include: { page: { include: { session: true } } },
+      });
+    }
     const byok = byokFromRequest(req);
 
     const article = await getArticle(line.page.session.subject);

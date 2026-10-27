@@ -84,7 +84,15 @@ export default function DocumentStep() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
-        await api.saveDocument({ id: document.id, title: document.title, blocks: document.blocks });
+        await api.saveDocument({
+          id: document.id,
+          title: document.title,
+          blocks: document.blocks,
+          // serverless: let ANY instance re-create the row (upsert) if it has
+          // never seen this document (multi-instance /tmp SQLite)
+          sessionId: session?.id,
+          subject: session?.subject,
+        });
         setSavedFlash(true);
         setTimeout(() => setSavedFlash(false), 1200);
       } catch {
@@ -105,6 +113,24 @@ export default function DocumentStep() {
         docType,
         title: title || undefined,
         instructions: instructions || undefined,
+        // serverless: this instance may not have the session — send the
+        // verified lines directly from the client (the store IS the source
+        // of truth after verification)
+        context: {
+          subject: session.subject,
+          lines: session.pages.flatMap((p) =>
+            p.lines
+              .filter((l) => l.kind !== "ignore" && (l.verifiedText ?? l.text).trim().length > 0)
+              .map((l) => ({
+                pageIndex: p.index,
+                order: l.index,
+                kind: l.kind,
+                text: (l.verifiedText ?? l.text).trim(),
+                latex: l.latex ?? null,
+                status: l.status,
+              })),
+          ),
+        },
       });
       setDocument(res.document);
       log(`document "${res.document.title}" generated (${res.document.blocks.length} blocks)`, "ok");
@@ -120,7 +146,17 @@ export default function DocumentStep() {
     if (!document) return;
     setExporting(true);
     try {
-      const res = await api.exportDocument({ id: document.id, format });
+      const res = await api.exportDocument({
+        id: document.id,
+        format,
+        // serverless: if this instance never saw the document row, rebuild
+        // it from the client's copy so the export works on any instance
+        sessionId: session?.id,
+        subject: session?.subject,
+        title: document.title,
+        docType: document.docType,
+        blocks: document.blocks,
+      });
       downloadBase64(res.filename, res.mime, res.base64);
       toast({ title: "Downloaded", description: res.filename });
     } catch (err) {

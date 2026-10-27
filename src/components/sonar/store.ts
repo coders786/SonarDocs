@@ -62,6 +62,10 @@ type SonarState = {
   setGenerating: (b: boolean) => void;
   setExporting: (b: boolean) => void;
   setGeminiKey: (key: string) => void;
+  /** layout bands per page id — client-side record so ANY pipeline call can
+   *  rebuild the page on a serverless instance that never saw it */
+  bandsByPage: Record<string, BandDecision[]>;
+  setBandsForPage: (pageId: string, bands: BandDecision[]) => void;
   reset: () => void;
 };
 
@@ -69,7 +73,7 @@ const now = () => new Date().toLocaleTimeString([], { hour12: false });
 
 // dev debugging aid: expose store snapshot (harmless in production)
 if (typeof window !== "undefined") {
-  (window as unknown as { __sonar?: unknown }).__sonarGetState = () => useSonar.getState();
+  (window as unknown as { __sonarGetState?: unknown }).__sonarGetState = () => useSonar.getState();
 }
 
 export const INITIAL_ARTICLES: SubjectSummary[] = [
@@ -161,6 +165,7 @@ export const useSonar = create<SonarState>((set) => ({
   // chips render differently on server vs client and React throws a
   // hydration mismatch (localStorage must never be read during render).
   geminiKey: "",
+  bandsByPage: {},
 
   setStep: (step) => set({ step }),
   setArticles: (articles) => set({ articles, articlesLoaded: true }),
@@ -186,6 +191,8 @@ export const useSonar = create<SonarState>((set) => ({
   setDocument: (document) => set({ document }),
   setGenerating: (generating) => set({ generating }),
   setGeminiKey: (key) => set({ geminiKey: persistGeminiKey(key) }),
+  setBandsForPage: (pageId, bands) =>
+    set((s) => ({ bandsByPage: { ...s.bandsByPage, [pageId]: bands } })),
   setExporting: (exporting) => set({ exporting }),
   reset: () =>
     set({
@@ -211,6 +218,7 @@ export const useSonar = create<SonarState>((set) => ({
       document: null,
       generating: false,
       exporting: false,
+      bandsByPage: {},
     }),
 }));
 

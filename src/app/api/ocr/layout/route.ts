@@ -5,6 +5,7 @@ import { AiConfigError, extractJson, visionChat, visionJson, LONG_HOST } from "@
 import { byokFromRequest, engineForSubject, geminiEnabled, sandboxAnalyzePage } from "@/lib/gemini";
 import { buildLayoutSystemPrompt, buildLayoutUserPrompt, type SubjectInfo } from "@/lib/ocr-prompts";
 import { getArticle } from "@/lib/subjects";
+import { findPageOrRebuild } from "@/lib/pipeline-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -264,7 +265,9 @@ export async function POST(req: NextRequest) {
     const pageId = String(body.pageId || "");
     if (!pageId) return NextResponse.json({ error: "pageId is required" }, { status: 400 });
 
-    const page = await db.ocrPage.findUnique({ where: { id: pageId }, include: { session: true } });
+    // serverless: the page may live on a different lambda instance's /tmp
+    // SQLite — rebuild it from the client-supplied context when missing
+    const page = await findPageOrRebuild(body.context);
     if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
     if (!page.overlayBase64 && !page.imageBase64) {
       return NextResponse.json({ error: "Page has no image stored" }, { status: 400 });

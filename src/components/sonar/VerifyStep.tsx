@@ -49,7 +49,6 @@ export default function VerifyStep() {
   const setSession = useSonar((s) => s.setSession);
   const log = useSonar((s) => s.log);
   const { toast } = useToast();
-
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [statuses, setStatuses] = useState<Record<string, string>>({});
   const [retrying, setRetrying] = useState<string | null>(null);
@@ -81,11 +80,39 @@ export default function VerifyStep() {
   };
 
   const retryLine = async (l: OcrLine) => {
+    if (!page || !session) return;
     setRetrying(l.id);
     try {
-      const res = await api.ocrRetryLine({ lineId: l.id });
-      const fresh = await api.getSession(session!.id);
-      setSession(fresh.session);
+      const uploads = useSonar.getState().uploads;
+      const res = await api.ocrRetryLine({
+        lineId: l.id,
+        order: l.index,
+        kind: l.kind,
+        text: valueOf(l),
+        context: {
+          sessionId: session.id,
+          pageId: page.id,
+          index: page.index,
+          subject: session.subject,
+          imageBase64: uploads[page.index],
+          bands: useSonar.getState().bandsByPage[page.id],
+          width: page.width ?? undefined,
+          height: page.height ?? undefined,
+        },
+      });
+      // update the store directly from the response — no getSession refresh
+      // (on serverless that round-trip can hit an instance without this page)
+      const st = useSonar.getState();
+      if (st.session) {
+        setSession({
+          ...st.session,
+          pages: st.session.pages.map((p) =>
+            p.id === page.id
+              ? { ...p, lines: p.lines.map((x) => (x.index === res.line.index ? { ...x, ...res.line } : x)) }
+              : p,
+          ),
+        });
+      }
       setEdits((e) => {
         const next = { ...e };
         delete next[l.id];
@@ -120,8 +147,16 @@ export default function VerifyStep() {
         setActivePage(activePage + 1);
         toast({ title: `Page ${page.index + 1} verified`, description: "Moving to the next page." });
       } else {
-        const fresh = await api.getSession(session!.id);
-        setSession(fresh.session);
+        // mark verified locally — the store session is the source of truth
+        // for the document step (serverless instances don't share DB state)
+        const st = useSonar.getState();
+        if (st.session) {
+          setSession({
+            ...st.session,
+            status: "verified",
+            pages: st.session.pages.map((p) => ({ ...p, status: "verified" })),
+          });
+        }
         setStep("document");
       }
     } catch (err) {

@@ -98,6 +98,11 @@ export async function POST(req: NextRequest) {
       deskewAngle: analysis.deskewAngle,
       candidateCount: analysis.bands.length,
       articleWords: article.content.split(/\s+/).filter(Boolean).length,
+      // processed page + numbered overlay so the client never needs a second
+      // round-trip to fetch them (on serverless, that round-trip can land on
+      // a different lambda instance that has never seen this session)
+      imageBase64: page.imageBase64,
+      overlayBase64: page.overlayBase64,
     });
   } catch (err) {
     console.error("[api/ocr/start] failed:", err);

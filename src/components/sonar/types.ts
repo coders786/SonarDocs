@@ -28,6 +28,23 @@ export type BandDecision = {
   reason: string;
 };
 
+/**
+ * Cross-instance pipeline context for serverless (Vercel) deployments:
+ * every lambda instance has its OWN ephemeral SQLite, so each pipeline call
+ * carries enough state for the server to rebuild the page row idempotently
+ * (stable ids) when the request lands on an instance that never saw it.
+ */
+export type PipelineContext = {
+  sessionId?: string;
+  pageId: string;
+  index?: number;
+  subject: string;
+  imageBase64?: string;
+  bands?: BandDecision[];
+  width?: number;
+  height?: number;
+};
+
 export type AltReading = { text: string; note?: string };
 
 export type OcrLine = {
@@ -317,12 +334,15 @@ export const api = {
       deskewAngle: number;
       candidateCount: number;
       articleWords: number;
+      imageBase64: string;
+      overlayBase64: string | null;
     }>("/api/ocr/start", payload),
-  ocrLayout: (payload: { pageId: string }) =>
+  ocrLayout: (payload: { pageId: string; context?: PipelineContext }) =>
     post<{ engine: string; bands: BandDecision[]; articleWords: number }>("/api/ocr/layout", payload),
-  ocrRead: (payload: { pageId: string; indices: number[] }) =>
+  ocrRead: (payload: { pageId: string; indices: number[]; context?: PipelineContext }) =>
     post<{ lines: OcrLine[] }>("/api/ocr/read", payload),
-  ocrRetryLine: (payload: { lineId: string }) => post<{ line: OcrLine }>("/api/ocr/retry-line", payload),
+  ocrRetryLine: (payload: { lineId: string; order?: number; kind?: string; text?: string; context?: PipelineContext }) =>
+    post<{ line: OcrLine }>("/api/ocr/retry-line", payload),
   ocrReview: (payload: { pageId: string; lines: Array<{ id: string; verifiedText: string; status: string }> }) =>
     post<{ ok: boolean; sessionStatus: string }>("/api/ocr/review", payload),
 
@@ -342,13 +362,21 @@ export const api = {
       }>;
     }>("/api/session"),
 
-  generateDocument: (payload: { sessionId: string; docType: DocType; title?: string; instructions?: string }) =>
-    post<{ document: SonarDocument }>("/api/document", payload),
+  generateDocument: (
+    payload: {
+      sessionId: string;
+      docType: DocType;
+      title?: string;
+      instructions?: string;
+      context?: { subject: string; lines: Array<{ pageIndex: number; order: number; kind: string; text: string; latex?: string | null; status?: string }> };
+    },
+  ) => post<{ document: SonarDocument }>("/api/document", payload),
   getDocument: (id: string) => get<{ document: SonarDocument }>(`/api/document?id=${id}`),
-  saveDocument: (payload: { id: string; title: string; blocks: DocBlock[] }) =>
+  saveDocument: (payload: { id: string; title: string; blocks: DocBlock[]; sessionId?: string; subject?: string }) =>
     put<{ document: SonarDocument }>("/api/document", payload),
-  exportDocument: (payload: { id: string; format: "docx" | "md" | "txt" }) =>
-    post<{ filename: string; mime: string; base64: string }>("/api/document/export", payload),
+  exportDocument: (
+    payload: { id: string; format: "docx" | "md" | "txt"; sessionId?: string; subject?: string; title?: string; docType?: string; blocks?: DocBlock[] },
+  ) => post<{ filename: string; mime: string; base64: string }>("/api/document/export", payload),
 };
 
 /* ---------------- client image helpers ---------------- */

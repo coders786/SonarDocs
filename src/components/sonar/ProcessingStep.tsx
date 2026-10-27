@@ -12,7 +12,7 @@ import {
   Search,
 } from "lucide-react";
 import { chunk, useSonar, upsertLines } from "./store";
-import { api, type PageState } from "./types";
+import { api, type PageState, type PipelineContext, type OcrLine } from "./types";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -34,6 +34,7 @@ export default function ProcessingStep() {
   const log = useSonar((s) => s.log);
   const setStep = useSonar((s) => s.setStep);
   const setActivePage = useSonar((s) => s.setActivePage);
+  const setBandsForPage = useSonar((s) => s.setBandsForPage);
 
   const [pages, setPages] = useState<PageState[]>([]);
   const [failedBands, setFailedBands] = useState<Record<string, number[]>>({});
@@ -60,31 +61,47 @@ export default function ProcessingStep() {
         id: start.pageId,
         index: start.index,
         status: "processing",
-        imageBase64: "", // filled below
-        overlayBase64: null,
+        imageBase64: start.imageBase64 || "",
+        overlayBase64: start.overlayBase64 || null,
         width: start.width,
         height: start.height,
         lines: [],
       };
       setPages((prev) => [...prev.filter((p) => p.id !== page.id), page].sort((a, b) => a.index - b.index));
-
-      // fetch authoritative page record (includes processed image + overlay)
-      const sess = await api.getSession(start.sessionId);
-      const dbPage = sess.session.pages.find((p) => p.id === start.pageId);
-      const pageFull: PageState = {
-        ...page,
-        imageBase64: dbPage?.imageBase64 || "",
-        overlayBase64: dbPage?.overlayBase64 || null,
-        lines: [],
-      };
-      setPages((prev) => prev.map((p) => (p.id === pageFull.id ? pageFull : p)));
-      setSession(sess.session);
+      // start's response now carries the processed image + overlay directly —
+      // no getSession round-trip (which on serverless can land on a different
+      // lambda instance that has never seen this session). The store session
+      // is maintained client-side from here on.
+      const pageFull: PageState = page;
+      {
+        const st = useSonar.getState();
+        const base =
+          st.session && st.session.id === start.sessionId
+            ? st.session
+            : { id: start.sessionId, subject: subject!, status: "active", pages: [] as PageState[], documents: [] as Array<{ id: string; title: string; updatedAt: string }> };
+        setSession({
+          ...base,
+          pages: [...base.pages.filter((p) => p.id !== pageFull.id), pageFull].sort((a, b) => a.index - b.index),
+        });
+      }
       setProgress({ pageId: start.pageId, overlayBase64: pageFull.overlayBase64 });
+
+      // context lets ANY serverless instance rebuild this page idempotently
+      const ctx: PipelineContext = {
+        sessionId: start.sessionId,
+        pageId: start.pageId,
+        index: start.index,
+        subject: subject!,
+        imageBase64,
+        width: start.width,
+        height: start.height,
+      };
 
       // ---- layout pass
       setProgress({ stage: "layout" });
       log(`AI layout pass with the ${subject} research dossier…`);
-      const layout = await api.ocrLayout({ pageId: start.pageId });
+      const layout = await api.ocrLayout({ pageId: start.pageId, context: ctx });
+      setBandsForPage(start.pageId, layout.bands);
       const readable = layout.bands.filter((b) => b.kind !== "ignore");
       log(
         `layout: ${layout.bands.length} bands (${readable.length} text${layout.bands.length - readable.length > 0 ? `, ${layout.bands.length - readable.length} ignored` : ""})${
@@ -102,10 +119,15 @@ export default function ProcessingStep() {
       const batches = chunk(indices, 1);
       const failed: number[] = [];
       let doneCount = 0;
+      // lines accumulated from read responses — the client is the source of
+      // truth on serverless (each response may come from a different lambda
+      // instance with its own ephemeral DB)
+      let accLines: OcrLine[] = [];
 
       const runBatch = async (batch: number[], attempt = 1): Promise<void> => {
         try {
-          const res = await api.ocrRead({ pageId: start.pageId, indices: batch });
+          const res = await api.ocrRead({ pageId: start.pageId, indices: batch, context: { ...ctx, bands: layout.bands } });
+          accLines = upsertLines({ ...pageFull, lines: accLines }, res.lines).lines;
           setPages((prev) => prev.map((p) => (p.id === start.pageId ? upsertLines(p, res.lines) : p)));
           doneCount += batch.length;
           const highConf = res.lines.filter((l) => l.confidence === "high").length;
@@ -137,13 +159,24 @@ export default function ProcessingStep() {
 
       if (failed.length) setFailedBands((prev) => ({ ...prev, [start.pageId]: failed }));
 
-      const finalLines = (await api.getSession(start.sessionId)).session.pages.find((p) => p.id === start.pageId)?.lines || [];
+      // use the locally accumulated lines (read responses) — no getSession
+      // round-trip that could land on an instance without this session
+      const finalLines = accLines;
       const done: PageState = { ...pageFull, lines: finalLines, status: "transcribed" };
       setPages((prev) => prev.map((p) => (p.id === done.id ? done : p)));
+      {
+        const st = useSonar.getState();
+        if (st.session && st.session.id === start.sessionId) {
+          setSession({
+            ...st.session,
+            pages: st.session.pages.map((p) => (p.id === done.id ? done : p)).sort((a, b) => a.index - b.index),
+          });
+        }
+      }
       setProgress({ stage: "done" });
       return done;
     },
-    [subject, log, setProgress, setSession],
+    [subject, log, setProgress, setSession, setBandsForPage],
   );
 
   /**
@@ -165,8 +198,8 @@ export default function ProcessingStep() {
           sid = useSonar.getState().sessionId ?? sid;
         }
         log("all pages processed — loading verification…", "ok");
-        const fresh = await api.getSession(useSonar.getState().sessionId!);
-        setSession(fresh.session);
+        // the store session has been maintained client-side throughout — no
+        // getSession round-trip (serverless instances don't share state)
         setActivePage(0);
         setStep("verify");
       } catch (err) {
@@ -187,32 +220,48 @@ export default function ProcessingStep() {
   }, [startPipeline]);
 
   const retryFailed = useCallback(async () => {
-    const sid = useSonar.getState().sessionId;
-    if (!sid) return;
+    const st0 = useSonar.getState();
+    const sid = st0.sessionId;
+    if (!sid || !st0.session) return;
     setFinishing(true);
     try {
-      const sess = await api.getSession(sid);
-      for (const p of sess.session.pages) {
+      // client-side session state (serverless instances don't share /tmp DBs)
+      for (const p of st0.session.pages) {
         const failed = failedBands[p.id] || [];
         if (!failed.length) continue;
         const retry = chunk(failed, 1);
         for (const batch of retry) {
           try {
-            const res = await api.ocrRead({ pageId: p.id, indices: batch });
+            const res = await api.ocrRead({
+              pageId: p.id,
+              indices: batch,
+              context: {
+                sessionId: sid,
+                pageId: p.id,
+                index: p.index,
+                subject: st0.session!.subject,
+                imageBase64: uploads[p.index],
+                bands: useSonar.getState().bandsByPage[p.id],
+                width: p.width ?? undefined,
+                height: p.height ?? undefined,
+              },
+            });
             setPages((prev) => prev.map((x) => (x.id === p.id ? upsertLines(x, res.lines) : x)));
+            const st = useSonar.getState();
+            if (st.session) {
+              setSession({ ...st.session, pages: st.session.pages.map((x) => (x.id === p.id ? upsertLines(x, res.lines) : x)) });
+            }
           } catch {
             /* keep */
           }
         }
       }
       setFailedBands({});
-      const fresh = await api.getSession(sid);
-      setSession(fresh.session);
       log("failed bands re-read", "ok");
     } finally {
       setFinishing(false);
     }
-  }, [failedBands, setSession, log]);
+  }, [failedBands, uploads, setPages, setSession, log]);
 
   const currentPage = pages.find((p) => p.index === progress.pageIndex) || pages[pages.length - 1];
   const crops = (currentPage?.lines.map((l) => l.cropBase64).filter(Boolean) ?? []) as string[];
@@ -376,9 +425,20 @@ export default function ProcessingStep() {
             </Button>
             <Button
               size="sm"
-              onClick={async () => {
-                const fresh = await api.getSession(useSonar.getState().sessionId!);
-                setSession(fresh.session);
+              onClick={() => {
+                // sync locally-accumulated pages (incl. partial reads) into the
+                // store session — no server round-trip (serverless instances
+                // don't share /tmp SQLite state)
+                const st = useSonar.getState();
+                if (st.session) {
+                  setSession({
+                    ...st.session,
+                    pages: pages.map((p) => {
+                      const sp = st.session!.pages.find((x) => x.id === p.id);
+                      return sp && sp.lines.length ? { ...p, lines: sp.lines } : p;
+                    }),
+                  });
+                }
                 setActivePage(0);
                 setStep("verify");
               }}

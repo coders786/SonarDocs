@@ -191,7 +191,34 @@ export async function POST(req: NextRequest) {
     const format = ["docx", "md", "txt"].includes(body.format) ? body.format : "docx";
     if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
 
-    const doc = await db.documentProject.findUnique({ where: { id } });
+    let doc = await db.documentProject.findUnique({ where: { id } });
+    if (!doc && typeof body.title === "string" && Array.isArray(body.blocks)) {
+      // serverless multi-instance: the DocumentProject row lives on another
+      // lambda instance. The client carries the document in its store —
+      // rebuild the row here (stable id) so the export works anywhere.
+      try {
+        const sid = String(body.sessionId || "");
+        if (sid) {
+          try {
+            await db.ocrSession.create({ data: { id: sid, subject: String(body.subject || "english"), status: "verified" } });
+          } catch {
+            /* exists */
+          }
+        }
+        doc = await db.documentProject.create({
+          data: {
+            id,
+            sessionId: sid || "local",
+            title: String(body.title || "Untitled Document"),
+            docType: String(body.docType || "formatted-notes"),
+            subject: String(body.subject || "english"),
+            blocks: JSON.stringify(body.blocks),
+          },
+        });
+      } catch {
+        /* race lost or malformed — fall through to the 404 below */
+      }
+    }
     if (!doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
 
     const blocks: DocBlock[] = JSON.parse(doc.blocks);

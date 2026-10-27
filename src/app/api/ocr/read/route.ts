@@ -5,6 +5,7 @@ import { buildReadSystemPrompt, buildReadUserPrompt, type SubjectInfo } from "@/
 import { getArticle } from "@/lib/subjects";
 import { AiConfigError, visionJson, LONG_HOST } from "@/lib/zai";
 import { byokFromRequest } from "@/lib/gemini";
+import { findPageOrRebuild } from "@/lib/pipeline-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,7 +60,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Read at most 4 bands per request." }, { status: 400 });
     }
 
-    const page = await db.ocrPage.findUnique({ where: { id: pageId }, include: { session: true } });
+    // serverless: rebuild the page from client context when this instance
+    // has never seen it (multi-instance /tmp SQLite)
+    const page = await findPageOrRebuild(body.context);
     if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
 
     const bandsData = page.bands ? JSON.parse(page.bands) : null;
@@ -140,7 +143,9 @@ export async function POST(req: NextRequest) {
           ]
         : [{ scale: baseScale, pad: 14 }];
 
-      async function cropWith(def: { scale: number; pad: number; growY?: number }): Promise<CropVariant> {
+      // (const arrow, not a hoisted function declaration, so TypeScript's
+      // null-narrowing of `page`/`band` above applies inside the closure)
+      const cropWith = async (def: { scale: number; pad: number; growY?: number }): Promise<CropVariant> => {
         const box = def.growY
           ? {
               x: band.box.x,
@@ -162,7 +167,7 @@ export async function POST(req: NextRequest) {
           if (retry.inkRatio > crop.inkRatio) crop = retry;
         }
         return crop;
-      }
+      };
 
       const sandboxUrl = sandboxMap.get(band.index);
       let crops: CropVariant[];
