@@ -28,12 +28,14 @@ export function EngineSettings({ open, onOpenChange }: { open: boolean; onOpenCh
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  useEffect(() => {
+  const [prevOpen, setPrevOpen] = useState(open);
+  if (open !== prevOpen) {
+    setPrevOpen(open);
     if (open) {
       setDraft(geminiKey);
       setResult(null);
     }
-  }, [open, geminiKey]);
+  }
 
   async function test() {
     setTesting(true);
@@ -58,32 +60,45 @@ export function EngineSettings({ open, onOpenChange }: { open: boolean; onOpenCh
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <KeyRound className="h-4 w-4 text-amber-700" aria-hidden />
-            AI engine — bring your own key
+            AI Engine Configuration
           </DialogTitle>
           <DialogDescription>
-            Paste a Gemini API key (Google AI Studio) to run the pipeline on the per-subject Gemini engines:
-            <span className="font-medium text-stone-700"> Sindhi → Gemini 3.5 Flash · medium thinking</span>,
-            <span className="font-medium text-stone-700"> Urdu / English / Mathematics → Gemini 3.5 Flash Lite · high thinking</span>{" "}
-            — all with code execution (the model crops the page itself in its sandbox). Your key is stored in this
-            browser only and sent per request — never saved on the server.
+            Gemini is configured on the server via <span className="font-mono text-stone-800">GEMINI_API_KEY</span>.
+            The pipeline automatically uses:
+            <br />
+            <span className="font-medium text-stone-700">· Sindhi → Gemini 3.5 Flash · medium thinking · code execution</span>
+            <br />
+            <span className="font-medium text-stone-700">· Urdu / English / Math → Gemini 3.5 Flash Lite · high thinking · code execution</span>
           </DialogDescription>
         </DialogHeader>
 
-        <label className="sr-only" htmlFor="gemini-key-input">
-          Gemini API key
-        </label>
-        <Input
-          id="gemini-key-input"
-          type="password"
-          value={draft}
-          onChange={(e) => {
-            setDraft(e.target.value);
-            setResult(null);
-          }}
-          placeholder="AIza…"
-          autoComplete="off"
-          spellCheck={false}
-        />
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-xs text-emerald-900">
+          <div className="flex items-center gap-2 font-semibold">
+            <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" aria-hidden />
+            <span>Server Gemini Engine is Active</span>
+          </div>
+          <p className="mt-1 text-[11px] text-emerald-800">
+            Connected to Google AI Studio. You can test connectivity below or optionally provide a custom override key.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-stone-600" htmlFor="gemini-key-input">
+            Custom override API key (optional)
+          </label>
+          <Input
+            id="gemini-key-input"
+            type="password"
+            value={draft}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setResult(null);
+            }}
+            placeholder="AIza… (leave blank to use server key)"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </div>
 
         {result && (
           <p
@@ -99,11 +114,6 @@ export function EngineSettings({ open, onOpenChange }: { open: boolean; onOpenCh
           </p>
         )}
 
-        <p className="text-[11px] leading-relaxed text-stone-500">
-          Without a key the pipeline runs on the built-in Z.ai engine (local python cropping). With a key, Gemini
-          handles layout + cropping via code execution and all reads.
-        </p>
-
         <DialogFooter className="flex flex-wrap gap-2 sm:justify-between">
           <Button
             variant="ghost"
@@ -116,22 +126,21 @@ export function EngineSettings({ open, onOpenChange }: { open: boolean; onOpenCh
             }}
             disabled={!geminiKey && !draft.trim()}
           >
-            Remove key
+            Clear override
           </Button>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={test} disabled={!draft.trim() || testing} className="gap-1.5">
+            <Button variant="outline" size="sm" onClick={test} disabled={testing} className="gap-1.5">
               {testing && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />}
-              Test
+              Test connection
             </Button>
             <Button
               size="sm"
               onClick={() => {
-                setGeminiKey(draft);
+                setGeminiKey(draft.trim());
                 onOpenChange(false);
               }}
-              disabled={!draft.trim()}
             >
-              Save
+              {draft.trim() ? "Save override" : "Done"}
             </Button>
           </div>
         </DialogFooter>

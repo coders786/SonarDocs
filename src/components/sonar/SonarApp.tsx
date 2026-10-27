@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "motion/react";
 import {
   BookOpenCheck,
+  Camera,
   FileText,
   Loader2,
   PenLine,
@@ -20,6 +21,7 @@ import VerifyStep from "./VerifyStep";
 import DocumentStep from "./DocumentStep";
 import ResearchLibrary from "./ResearchLibrary";
 import { EngineSettings } from "./EngineSettings";
+import { CameraGuideDialog } from "./CameraGuideDialog";
 import { Button } from "@/components/ui/button";
 
 const STEPS = [
@@ -31,6 +33,7 @@ const STEPS = [
 
 export default function SonarApp() {
   const step = useSonar((s) => s.step);
+  const articles = useSonar((s) => s.articles);
   const articlesLoaded = useSonar((s) => s.articlesLoaded);
   const setArticles = useSonar((s) => s.setArticles);
   const setStep = useSonar((s) => s.setStep);
@@ -42,6 +45,7 @@ export default function SonarApp() {
   const geminiKey = useSonar((s) => s.geminiKey);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [engineOpen, setEngineOpen] = useState(false);
+  const [cameraGuideOpen, setCameraGuideOpen] = useState(false);
 
   useEffect(() => {
     if (!articlesLoaded) {
@@ -145,18 +149,23 @@ export default function SonarApp() {
             <Button
               variant="outline"
               size="sm"
+              onClick={() => setCameraGuideOpen(true)}
+              className="gap-1.5 border-amber-300 bg-amber-50/80 text-amber-900 hover:bg-amber-100 hover:text-amber-950 font-medium"
+            >
+              <Camera className="h-4 w-4 text-amber-700" aria-hidden />
+              <span className="hidden sm:inline">Camera Guide</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => setEngineOpen(true)}
-              className={`relative gap-1.5 border-stone-300 bg-white/70 hover:bg-amber-50 hover:text-amber-900 ${
-                geminiKey ? "border-amber-300 text-amber-900" : ""
-              }`}
-              aria-label="AI engine settings (bring your own Gemini key)"
-              title="AI engine settings — bring your own Gemini key"
+              className="relative gap-1.5 border-stone-300 bg-white/70 hover:bg-amber-50 hover:text-amber-900"
+              aria-label="AI engine settings"
+              title="AI engine configuration"
             >
               <Settings2 className="h-4 w-4" aria-hidden />
-              <span className="hidden sm:inline">Engine</span>
-              {geminiKey && (
-                <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-amber-600" aria-hidden />
-              )}
+              <span className="hidden sm:inline">AI Engine</span>
+              <span className="h-2 w-2 rounded-full bg-emerald-500" aria-label="Engine active" />
             </Button>
             <Button
               variant="outline"
@@ -188,7 +197,7 @@ export default function SonarApp() {
 
       {/* ---------- Main ---------- */}
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
-        <AnimatePresence mode="wait">
+        <AnimatePresence mode="wait" initial={false}>
           <motion.div
             key={step}
             initial={{ opacity: 0, y: 12 }}
@@ -196,7 +205,7 @@ export default function SonarApp() {
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.25, ease: "easeOut" }}
           >
-            {!articlesLoaded ? (
+            {articles.length === 0 && !articlesLoaded ? (
               <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-stone-500">
                 <Loader2 className="h-6 w-6 animate-spin" aria-hidden />
                 <p className="text-sm">Loading research library…</p>
@@ -226,8 +235,9 @@ export default function SonarApp() {
         </div>
       </footer>
 
-      <ResearchLibrary open={libraryOpen} onOpenChange={setLibraryOpen} />
-      <EngineSettings open={engineOpen} onOpenChange={setEngineOpen} />
+      {libraryOpen && <ResearchLibrary open={libraryOpen} onOpenChange={setLibraryOpen} />}
+      {engineOpen && <EngineSettings open={engineOpen} onOpenChange={setEngineOpen} />}
+      {cameraGuideOpen && <CameraGuideDialog open={cameraGuideOpen} onOpenChange={setCameraGuideOpen} />}
     </div>
   );
 }

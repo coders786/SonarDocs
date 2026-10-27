@@ -84,8 +84,38 @@ export function byokFromRequest(req: { headers: { get(name: string): string | nu
   return sanitizeByokKey(req.headers.get("x-gemini-key"));
 }
 
+import fs from "fs";
+import path from "path";
+
+function readKeyFromFile(): string {
+  try {
+    for (const name of [".env.local", ".env"]) {
+      const p = path.join(process.cwd(), name);
+      if (fs.existsSync(p)) {
+        const content = fs.readFileSync(p, "utf-8");
+        const match = content.match(/GEMINI_API_KEY=["']?([^"'\r\n]+)["']?/);
+        if (match && match[1] && !match[1].startsWith("MY_")) {
+          return match[1].trim();
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return "";
+}
+
 export function envGeminiKey(): string {
-  return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
+  const envVal = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
+  if (envVal && !envVal.startsWith("MY_") && envVal.length > 20) {
+    return envVal;
+  }
+  const fromFile = readKeyFromFile();
+  if (fromFile) {
+    process.env.GEMINI_API_KEY = fromFile;
+    return fromFile;
+  }
+  return envVal;
 }
 
 /** True when a Gemini key is available (BYOK or env) — engine active. */

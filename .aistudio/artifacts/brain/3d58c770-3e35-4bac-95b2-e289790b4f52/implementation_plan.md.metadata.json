@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan to eliminate React hydration mismatch and restore complete interactive click handling in the AI Studio embedded preview.",
+  "updatedAt":  "2026-10-26T21:24:09.103354747Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

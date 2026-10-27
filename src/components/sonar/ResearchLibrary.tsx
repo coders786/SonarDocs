@@ -18,34 +18,37 @@ export default function ResearchLibrary({ open, onOpenChange }: { open: boolean;
   const { toast } = useToast();
 
   const [selected, setSelected] = useState<SubjectSummary | null>(null);
+  const activeSelected = selected ?? (articles.length > 0 ? articles[0] : null);
   const [article, setArticle] = useState<Article | null>(null);
-  const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newArticle, setNewArticle] = useState({ title: "", language: "", direction: "ltr" as "ltr" | "rtl", content: "" });
 
-  useEffect(() => {
-    if (open && !selected && articles.length > 0) {
-      setSelected(articles[0]);
-    }
-  }, [open, articles, selected]);
+  const loading = Boolean(activeSelected?.subject && (!article || article.subject !== activeSelected.subject));
 
   useEffect(() => {
-    if (!selected) return;
-    setLoading(true);
-    setEditing(false);
-    setCreating(false);
+    const subj = activeSelected?.subject;
+    if (!subj) return;
+    let cancelled = false;
     api
-      .getArticle(selected.subject)
+      .getArticle(subj)
       .then((r) => {
+        if (cancelled) return;
         setArticle(r.article);
         setDraft(r.article.content);
+        setEditing(false);
+        setCreating(false);
       })
-      .catch(() => setArticle(null))
-      .finally(() => setLoading(false));
-  }, [selected]);
+      .catch(() => {
+        if (cancelled) return;
+        setArticle(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSelected?.subject]);
 
   const save = async () => {
     if (!article) return;
@@ -107,7 +110,7 @@ export default function ResearchLibrary({ open, onOpenChange }: { open: boolean;
                 onClick={() => setSelected(a)}
                 className={cn(
                   "w-full rounded-lg px-3 py-2 text-left transition-colors",
-                  selected?.subject === a.subject ? "bg-amber-100 text-amber-950" : "hover:bg-stone-100",
+                  activeSelected?.subject === a.subject ? "bg-amber-100 text-amber-950" : "hover:bg-stone-100",
                 )}
               >
                 <p className="truncate text-sm font-medium">{a.language}</p>

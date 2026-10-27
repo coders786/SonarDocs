@@ -4,11 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   BookOpen,
+  Camera,
+  Check,
   Feather,
   FileText,
   ImagePlus,
   Languages,
   Sigma,
+  Sparkles,
   Trash2,
   Type,
   X,
@@ -18,6 +21,8 @@ import { useSonar } from "./store";
 import { api, fileToDownscaledDataUrl, type SubjectSummary } from "./types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { CameraGuideDialog } from "./CameraGuideDialog";
+import { SAMPLE_PAGES } from "@/lib/sample-pages";
 
 function SubjectIcon({ icon, className }: { icon: string; className?: string }) {
   switch (icon) {
@@ -69,11 +74,41 @@ export default function SetupStep() {
   const uploads = useSonar((s) => s.uploads);
   const setUploads = useSonar((s) => s.setUploads);
   const setStep = useSonar((s) => s.setStep);
+  const setSession = useSonar((s) => s.setSession);
+  const setActivePage = useSonar((s) => s.setActivePage);
+  const setDocument = useSonar((s) => s.setDocument);
   const clearLogs = useSonar((s) => s.clearLogs);
   const log = useSonar((s) => s.log);
 
+  const loadRecent = async (sessionId: string) => {
+    try {
+      const { session } = await api.getSession(sessionId);
+      if (!session.pages.length) return;
+      setSession(session);
+      setSubject(session.subject);
+      const firstUnverified = session.pages.findIndex((p) => p.status !== "verified");
+      if (session.documents.length > 0) {
+        try {
+          const { document } = await api.getDocument(session.documents[0].id);
+          setDocument(document);
+        } catch {
+          /* ignore */
+        }
+        setStep("document");
+      } else if (firstUnverified !== -1) {
+        setActivePage(firstUnverified);
+        setStep("verify");
+      } else {
+        setStep("verify");
+      }
+    } catch (err) {
+      console.error("Failed to load session", err);
+    }
+  };
+
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [cameraGuideOpen, setCameraGuideOpen] = useState(false);
   const [engine, setEngine] = useState<EngineInfo | null>(null);
   const [recent, setRecent] = useState<Array<{ id: string; subject: string; status: string; updatedAt: string; pages: Array<{ id: string; status: string }> }>>([]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -158,9 +193,17 @@ export default function SetupStep() {
             return (
               <button
                 key={a.subject}
-                onClick={() => setSubject(a.subject)}
+                type="button"
+                onClick={() => {
+                  setSubject(a.subject);
+                  const matched = SAMPLE_PAGES.find((s) => s.subject === a.subject);
+                  if (matched && uploads.length === 0) {
+                    setUploads([matched.dataUrl]);
+                    log(`Loaded ${a.language} sample page automatically.`, "ok");
+                  }
+                }}
                 aria-pressed={active}
-                className={`group relative flex h-full flex-col rounded-2xl border p-4 text-left transition-all ${
+                className={`group relative flex h-full flex-col rounded-2xl border p-4 text-left transition-all cursor-pointer ${
                   active
                     ? "border-amber-600 bg-amber-50/80 shadow-[0_0_0_3px_rgba(180,83,9,0.12)]"
                     : "border-stone-200 bg-white/80 hover:border-amber-300 hover:bg-amber-50/40"
@@ -225,9 +268,22 @@ export default function SetupStep() {
 
       {/* dropzone */}
       <section aria-label="Upload handwritten pages">
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-stone-500">
-          2 · Add handwritten page photos
-        </h2>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500">
+            2 · Add handwritten page photos
+          </h2>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setCameraGuideOpen(true)}
+            className="gap-2 border-amber-300 bg-amber-50/80 text-amber-900 hover:bg-amber-100 hover:text-amber-950 font-medium shadow-xs"
+          >
+            <Camera className="h-4 w-4 text-amber-700" />
+            <span>Camera Photo Guide</span>
+          </Button>
+        </div>
+
         <div
           role="button"
           tabIndex={0}
@@ -242,19 +298,58 @@ export default function SetupStep() {
           }}
           onDragLeave={() => setDragging(false)}
           onDrop={onDrop}
-          className={`dropzone flex min-h-44 cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl bg-white/70 p-8 text-center ${
-            dragging ? "drag" : ""
+          className={`dropzone flex min-h-44 cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl bg-white/70 p-8 text-center border-2 border-dashed border-stone-200 hover:border-amber-400 transition-colors ${
+            dragging ? "drag border-amber-500 bg-amber-50/50" : ""
           }`}
         >
           {busy ? (
             <p className="text-sm text-stone-500">Processing images…</p>
           ) : (
             <>
-              <ImagePlus className="h-8 w-8 text-amber-700" aria-hidden />
-              <p className="text-sm font-medium text-stone-700">
-                Drop page photos here, paste from clipboard, or click to browse
-              </p>
-              <p className="text-xs text-stone-400">JPG / PNG / WebP · up to 8 pages · phone photos work fine</p>
+              <div className="flex items-center justify-center gap-2">
+                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-800">
+                  <Camera className="h-5 w-5" aria-hidden />
+                </span>
+                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-stone-100 text-stone-600">
+                  <ImagePlus className="h-5 w-5" aria-hidden />
+                </span>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-stone-800">
+                  Drop page photos here, paste from clipboard, or click to browse
+                </p>
+                <p className="mt-0.5 text-xs text-stone-500">
+                  JPG / PNG / WebP · up to 8 pages · camera photos work great
+                </p>
+              </div>
+
+              <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setCameraGuideOpen(true);
+                  }}
+                  className="gap-1.5 bg-amber-700 text-white hover:bg-amber-800 shadow-sm"
+                >
+                  <Camera className="h-3.5 w-3.5" />
+                  Take Photo & Camera Guide
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    inputRef.current?.click();
+                  }}
+                  className="gap-1.5 border-stone-300 bg-white hover:bg-stone-50"
+                >
+                  <ImagePlus className="h-3.5 w-3.5" />
+                  Browse Files
+                </Button>
+              </div>
             </>
           )}
           <input
@@ -274,7 +369,6 @@ export default function SetupStep() {
           <div className="mt-3 flex flex-wrap gap-3">
             {uploads.map((u, i) => (
               <div key={i} className="group relative">
-                { }
                 <img
                   src={u}
                   alt={`Page ${i + 1} preview`}
@@ -284,6 +378,7 @@ export default function SetupStep() {
                   {i + 1}
                 </span>
                 <button
+                  type="button"
                   onClick={() => setUploads(uploads.filter((_, j) => j !== i))}
                   className="absolute -right-2 -top-2 hidden h-6 w-6 place-items-center rounded-full bg-red-600 text-white shadow group-hover:grid"
                   aria-label={`Remove page ${i + 1}`}
@@ -294,6 +389,64 @@ export default function SetupStep() {
             ))}
           </div>
         )}
+
+        {/* Sample Pages section */}
+        <div className="mt-6 border-t border-stone-200/80 pt-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-amber-900 flex items-center gap-1.5">
+              <Sparkles className="h-3.5 w-3.5 text-amber-700" />
+              <span>Or Try a Sample Handwritten Page (1-Click Demo)</span>
+            </h3>
+            <span className="text-[11px] text-stone-500">Instant test · no upload needed</span>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+            {SAMPLE_PAGES.map((sample) => {
+              const isSelected = subject === sample.subject && uploads.includes(sample.dataUrl);
+              return (
+                <button
+                  key={sample.id}
+                  type="button"
+                  onClick={() => {
+                    setSubject(sample.subject);
+                    setUploads([sample.dataUrl]);
+                    log(`Loaded 1-click sample: ${sample.title} (${sample.subject})`, "ok");
+                  }}
+                  className={`group relative flex items-start gap-3 rounded-xl border p-3 text-left transition-all ${
+                    isSelected
+                      ? "border-amber-600 bg-amber-50/90 shadow-sm ring-1 ring-amber-500"
+                      : "border-stone-200 bg-white/90 hover:border-amber-400 hover:bg-amber-50/40"
+                  }`}
+                >
+                  <div className="relative h-16 w-14 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-stone-100">
+                    <img
+                      src={sample.dataUrl}
+                      alt={sample.title}
+                      className="h-full w-full object-cover"
+                    />
+                    {isSelected && (
+                      <span className="absolute inset-0 grid place-items-center bg-amber-900/40 text-white">
+                        <Check className="h-4 w-4" />
+                      </span>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-bold capitalize text-stone-900">{sample.subject}</span>
+                      {isSelected && (
+                        <span className="rounded bg-amber-700 px-1.5 py-0.5 text-[9px] font-bold uppercase text-white">
+                          Selected
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-0.5 line-clamp-1 text-xs font-medium text-stone-700">{sample.title}</p>
+                    <p className="mt-0.5 line-clamp-2 text-[10px] text-stone-500">{sample.description}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </section>
 
       {/* recent sessions */}
@@ -305,7 +458,7 @@ export default function SetupStep() {
               <button
                 key={s.id}
                 onClick={() => {
-                  window.location.href = `/?session=${s.id}`;
+                  loadRecent(s.id);
                 }}
                 className="flex items-center gap-2 rounded-full border border-stone-200 bg-white/80 px-3 py-1.5 text-xs text-stone-600 transition-colors hover:border-amber-300 hover:text-amber-900"
               >
@@ -343,6 +496,8 @@ export default function SetupStep() {
           will be injected into the OCR system prompt.
         </p>
       )}
+
+      {cameraGuideOpen && <CameraGuideDialog open={cameraGuideOpen} onOpenChange={setCameraGuideOpen} />}
     </div>
   );
 }

@@ -1,0 +1,10 @@
+{
+  "name": "Sonar Docs",
+  "description": "Research-driven handwriting OCR and document studio for Sindhi, Urdu, English, and Mathematics.",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

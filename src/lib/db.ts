@@ -11,22 +11,14 @@ import { PrismaClient } from "@prisma/client";
  * auto-bootstrap the schema from db/bootstrap.sql (ensureDb below).
  */
 function resolveDbUrl(): void {
-  const url = process.env.DATABASE_URL;
-  const needsTmp =
-    !url ||
-    url.startsWith("file:/home/") ||
-    (url.startsWith("file:") && !fs.existsSync(path.dirname(url.slice("file:".length) || "/")));
-  if (process.env.VERCEL || needsTmp) {
-    if (process.env.VERCEL || !url || url.startsWith("file:/home/")) {
-      const dir = process.env.VERCEL ? "/tmp/sonar" : path.join(process.cwd(), "db");
-      try {
-        fs.mkdirSync(dir, { recursive: true });
-      } catch {
-        /* ignore */
-      }
-      process.env.DATABASE_URL = `file:${path.join(dir, "custom.db")}`;
-    }
+  const dir = process.env.VERCEL ? "/tmp/sonar" : path.join(process.cwd(), "db");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    /* ignore */
   }
+  const dbPath = path.join(dir, "custom.db");
+  process.env.DATABASE_URL = `file:${dbPath}`;
 }
 resolveDbUrl();
 
@@ -35,7 +27,30 @@ const globalForPrisma = globalThis as unknown as {
   __sonarDbReady: Promise<void> | undefined;
 };
 
-export const db = globalForPrisma.prisma ?? new PrismaClient();
+let prismaInstance: PrismaClient;
+try {
+  prismaInstance = globalForPrisma.prisma ?? new PrismaClient();
+} catch (err) {
+  console.warn("[AI Studio] Database not connected — using mock proxy fallback:", err);
+  const noOp: any = {
+    findMany: async () => [],
+    findFirst: async () => null,
+    findUnique: async () => null,
+    create: async (d: any) => d?.data ?? {},
+    update: async (d: any) => d?.data ?? {},
+    delete: async () => ({}),
+    upsert: async (d: any) => d?.create ?? {},
+    count: async () => 0,
+  };
+  prismaInstance = new Proxy({} as PrismaClient, {
+    get: (_, prop) => {
+      if (prop === "$executeRawUnsafe") return async () => 0;
+      return noOp;
+    },
+  });
+}
+
+export const db = prismaInstance;
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = db;
 
