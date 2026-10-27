@@ -64,14 +64,19 @@ export function engineForSubject(
     ? {
         model: MODEL_HARD,
         thinkingLevel: "medium",
+        // code execution pays off on hard RTL scripts (Nastaliq segmentation,
+        // crop measurement). Measured on easy scripts it just made reads
+        // 3-5× slower (up to 85s/band — the model writes+runs code it doesn't
+        // need), so it is reserved for the hard cases. The page-analysis
+        // sandbox always keeps it (see sandboxAnalyzePage).
         codeExecution: true,
         label: "Gemini 3.5 Flash · medium thinking · code execution",
       }
     : {
         model: MODEL_DEFAULT,
         thinkingLevel: "high",
-        codeExecution: true,
-        label: "Gemini 3.5 Flash Lite · high thinking · code execution",
+        codeExecution: false,
+        label: "Gemini 3.5 Flash Lite · high thinking",
       };
 }
 
@@ -402,7 +407,9 @@ export async function sandboxAnalyzePage(opts: {
   const res = await geminiGenerate({
     system: opts.system,
     user: opts.user,
-    engine: opts.engine,
+    // the sandbox IS the code-execution feature — always attach the tool,
+    // even for easy subjects (engineForSubject disables it for reads)
+    engine: { ...opts.engine, codeExecution: true },
     apiKey: pinned,
     timeoutMs: opts.timeoutMs ?? 180_000,
     extraParts: [{ fileData: { fileUri: file.uri, mimeType: opts.pageMime } }],

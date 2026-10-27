@@ -62,7 +62,7 @@ export const fmtDate = (iso: string) => FMT_DATE.format(new Date(iso));
 function engineChip(a: SubjectSummary, info: EngineInfo | null, byokKey: string): { text: string; active: boolean } | null {
   if (byokKey) {
     const conf = info?.subjects.find((s) => s.subject === a.subject);
-    const [model, thinking] = (conf ? conf.label : a.direction === "rtl" ? "Gemini 3.5 Flash · medium thinking · code execution" : "Gemini 3.5 Flash Lite · high thinking · code execution").split("·").map((p) => p.trim());
+    const [model, thinking] = (conf ? conf.label : a.direction === "rtl" ? "Gemini 3.5 Flash · medium thinking · code execution" : "Gemini 3.5 Flash Lite · high thinking").split("·").map((p) => p.trim());
     return { text: `Gemini (your key) · ${model.replace(/^Gemini /i, "")} · ${(thinking || "").replace(" thinking", "")} · code exec`, active: true };
   }
   if (!info) return null;

@@ -79,7 +79,7 @@ export function EngineSettings({ open, onOpenChange }: { open: boolean; onOpenCh
             <br />
             <span className="font-medium text-stone-700">· Sindhi → Gemini 3.5 Flash · medium thinking · code execution</span>
             <br />
-            <span className="font-medium text-stone-700">· Urdu / English / Math → Gemini 3.5 Flash Lite · high thinking · code execution</span>
+            <span className="font-medium text-stone-700">· Urdu / English / Math → Gemini 3.5 Flash Lite · high thinking</span>
           </DialogDescription>
         </DialogHeader>
 
